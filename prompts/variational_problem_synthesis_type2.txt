@@ -1,0 +1,33 @@
+You are an expert in mathematics and linguistics. Your task is to perform a semantically consistent transformation on the given mathematical word problem. I will provide you with a math problem, and you will generate {N} distinct variations of this problem.
+
+**Constraints for the transformation:**
+1.  **Preserve Semantic Equivalence:** The core mathematical logic, the relationships between quantities, the values, and the final question must remain unchanged. The generated variants must be solvable using the exact same steps and yield the identical final answer as the original problem.
+2.  **Vary Syntactic Structure and Lexical Expressions:** You must rephrase the problem by altering its grammatical structure and vocabulary. This includes, but is not limited to:
+    *   Changing sentence structure (e.g., from active to passive voice, or splitting/merging sentences).
+    *   Using synonyms for non-mathematical terms (e.g., "purchase" instead of "buy", "remaining" instead of "left over").
+    *   Altering the narrative style or the context of the problem without changing the underlying mathematical setup.
+    *   Reordering the presentation of information, as long as it does not change the logical flow required to solve it.
+3.  **Maintain Mathematical Precision:** Do not introduce any ambiguity. All mathematical entities, variables, and their relationships must be clearly and correctly stated in the new variants.
+4.  **Target Audience and Complexity:** The complexity and tone of the rephrased problems should be appropriate for the original problem's level (e.g., Grade School for GSM8K, High School Competition for AIME/MATH).
+5.  **Exclusion:** Do not change the numbers or the core mathematical question being asked.
+
+**Original Problem:**
+<question>
+{Qeustion}
+</question>
+
+**Model-generated Response:**
+<response>
+{REPLACE}
+</response>
+
+**Instructions:**
+Please generate a semantically consistent but syntactically and lexically diverse variants of the original problem.
+
+**Output:**
+Provide your final synthetic problem formatted strictly as:
+
+```text
+[Your synthetic problem here]
+```
+"""
