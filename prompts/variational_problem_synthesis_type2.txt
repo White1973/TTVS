@@ -1,4 +1,4 @@
-You are an expert in mathematics and linguistics. Your task is to perform a semantically consistent transformation on the given mathematical word problem. I will provide you with a math problem, and you will generate {N} distinct variations of this problem.
+You are an expert in mathematics and linguistics. Your task is to perform a semantically consistent transformation on the given mathematical word problem. I will provide you with a math problem, and you will generate one distinct variations of this problem.
 
 **Constraints for the transformation:**
 1.  **Preserve Semantic Equivalence:** The core mathematical logic, the relationships between quantities, the values, and the final question must remain unchanged. The generated variants must be solvable using the exact same steps and yield the identical final answer as the original problem.
@@ -13,12 +13,12 @@ You are an expert in mathematics and linguistics. Your task is to perform a sema
 
 **Original Problem:**
 <question>
-{Qeustion}
+{QUESTION}
 </question>
 
 **Model-generated Response:**
 <response>
-{REPLACE}
+{RESPONSE}
 </response>
 
 **Instructions:**
