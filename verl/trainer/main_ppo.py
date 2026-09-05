@@ -48,6 +48,11 @@ def run_ppo(config) -> None:
                     "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "true",
                 }
             },
+            _system_config={
+            "timeout_ms_for_init": 600000,
+            "object_store_memory": 10000000000,  # 10GB
+            "redis_max_memory": 10000000000,
+            },
             num_cpus=config.ray_init.num_cpus,
         )
 
