@@ -691,6 +691,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             metrics["perf/mfu/actor"] = (
                 estimated_flops * self.config.actor.ppo_epochs / promised_flops / self.world_size
             )
+            metrics["perf/mfu/estimated_flops"] = (
+                estimated_flops / self.world_size
+            )
+            metrics["perf/mfu/promised_flops"] = (
+                promised_flops / self.world_size
+            )
             metrics["perf/max_memory_allocated_gb"] = get_torch_device().max_memory_allocated() / (1024**3)
             metrics["perf/max_memory_reserved_gb"] = get_torch_device().max_memory_reserved() / (1024**3)
             metrics["perf/cpu_memory_used_gb"] = psutil.virtual_memory().used / (1024**3)
