@@ -379,7 +379,7 @@ class RayPPOTrainer:
         config = self.config
         # number of GPUs total
         n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
-        #pprint("strategy", config.actor_rollout_ref.actor.strategy)
+        
         if config.actor_rollout_ref.actor.strategy == "megatron":
             model_parallel_size = (
                 config.actor_rollout_ref.actor.megatron.tensor_model_parallel_size
@@ -719,7 +719,7 @@ class RayPPOTrainer:
                 "do_sample": self.config.actor_rollout_ref.rollout.val_kwargs.do_sample,
                 "validate": True,
             }
-            print(f"test_gen_batch meta info: {test_gen_batch.meta_info}")
+            #print(f"test_gen_batch meta info: {test_gen_batch.meta_info}")
 
             # pad to be divisible by dp_size
             size_divisor = (
@@ -753,7 +753,7 @@ class RayPPOTrainer:
             sample_scores.extend(scores)
 
             reward_extra_infos_dict["reward"].extend(scores)
-            print(f"len reward_extra_infos_dict['reward']: {len(reward_extra_infos_dict['reward'])}")
+            
             if "reward_extra_info" in result:
                 for key, lst in result["reward_extra_info"].items():
                     reward_extra_infos_dict[key].extend(lst)
@@ -918,7 +918,7 @@ class RayPPOTrainer:
             self.config.trainer.default_local_dir, f"global_step_{self.global_steps}"
         )
 
-        print(f"local_global_step_folder: {local_global_step_folder}")
+        # print(f"local_global_step_folder: {local_global_step_folder}")
         actor_local_path = os.path.join(local_global_step_folder, "actor")
 
         actor_remote_path = (
@@ -1115,10 +1115,7 @@ class RayPPOTrainer:
 
                 batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
                 #batch_keys_to_pop_aug = ["input_ids_aug", "attention_mask_aug", "position_ids_aug"]
-                #print("index", batch_dict.keys(), type(batch_dict["index"]),len(batch_dict["index"]),batch_dict["index"])
                 
-                # print("id", type(batch_dict['id']), batch_dict['id'])
-                # str_list= batch_dict["index"].tolist()
                 index_list = [int(index.split('-')[-1]) for index in batch_dict["index"].tolist()]
                 # index_list.extend(int_list)
                  
@@ -1223,7 +1220,7 @@ class RayPPOTrainer:
                             reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
                         batch.batch['reward_tensor'] = reward_tensor
                         
-                    print('global_steps', self.global_steps)
+                    
                     if self.global_steps>=MixInput_step:
                         ##################################################################################################
                         svs_metrics = {}
@@ -1266,16 +1263,20 @@ class RayPPOTrainer:
                         print('##############################step2##############################')                 
                         ori_r2q_batch_len = len(r2q_batch.batch)
                         responses_strs = self.tokenizer.batch_decode(r2q_batch.batch['responses'], skip_special_tokens=True)
+                        responses_strs=[response if len(response)<=self.config.data.max_prompt_length else response[-self.config.data.max_prompt_length:] for response in responses_strs]
                         response_to_question_input = [self.tokenizer.apply_chat_template([{"content": self.response_to_question_prompt.format(QUESTION=batch.non_tensor_batch["raw_prompt"][index], RESPONSE=response), "role": "user"}], tokenize=False, add_generation_prompt=True, enable_thinking=False) for index, response in enumerate(responses_strs)]
                         #response_to_question_input = [self.tokenizer.apply_chat_template([{"content": self.response_to_question_prompt.replace(r"{REPLACE}", response), "role": "user"}], tokenize=False, add_generation_prompt=True) for response in responses_strs]
+                        
                         response_to_question_input_tokens = self.tokenizer.batch_encode_plus(response_to_question_input, add_special_tokens=False).input_ids
                         response_to_question_input_lengths = [len(tokens) for tokens in response_to_question_input_tokens]
                         response_to_question_input_length_remain_index = np.where(np.array(response_to_question_input_lengths) <= self.config.data.max_prompt_length*2)[0].tolist() #Length filtering step. To prevent inputs that are too long from causing model errors or inefficiencies
+                        
                         if len(response_to_question_input_length_remain_index)<=0:
                             print('remaining', self.config.data.max_prompt_length)
                             print('length', response_to_question_input_lengths)
                             print('response_to_question_input_length_remain_index is empty')
                             continue
+                        
                         r2q_batch = r2q_batch.select_idxs(response_to_question_input_length_remain_index)           
                         response_to_question_input = [response_to_question_input[i] for i in response_to_question_input_length_remain_index]
                         svs_metrics["SvS-Valid-Ratio/VPS-len"] = np.round(len(response_to_question_input_length_remain_index) * 100 / ori_r2q_batch_len, 2).item()
@@ -1283,9 +1284,8 @@ class RayPPOTrainer:
                         try:
                             r2q_model_inputs = self.tokenizer(response_to_question_input, return_tensors="pt", add_special_tokens=False, padding=True, truncation=True, max_length=self.config.data.max_prompt_length)
                         except:
-                            print('response_to_question_input',len(response_to_question_input))
+                            print('error response_to_question_input',len(response_to_question_input))
                             lens=[len(item) for item in response_to_question_input]
-                            print('error', item)
                             continue
                         r2q_input_ids = r2q_model_inputs.pop("input_ids")
                         r2q_attention_mask = r2q_model_inputs.pop("attention_mask")
@@ -1311,14 +1311,16 @@ class RayPPOTrainer:
                         if repeat_sampling_sglang_grpo:
                             r2q_gen_batch = r2q_gen_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                         r2q_gen_batch.meta_info = {"r2q": True, "temperature": self.config.actor_rollout_ref.rollout.non_think_temperature, "top_p": self.config.actor_rollout_ref.rollout.non_think_top_p, "n": 1}
-                        synthetic_n = int(self.config.ttrl.n_votes_per_prompt/4)
-                        r2q_gen_batch.meta_info["kwargs"] = {"n": int(synthetic_n/2)} 
+                        synthetic_n = int(self.config.ttrl.n_votes_per_prompt/4) #
+                        r2q_gen_batch.meta_info["kwargs"] = {"n": int(synthetic_n)} 
+                        
                         r2q_gen_batch_padded, pad_size = pad_dataproto_to_divisor(r2q_gen_batch, self.actor_rollout_wg.world_size) #In distributed training, it is often required that the batch size be divisible by the number of working nodes (GPUs). This line of code fulfills this requirement by adding temporary "padding" data
-                    
+                        
                     
                         ###########################################
-                        synthetic_rollout=int(self.config.actor_rollout_ref.rollout.n/4)
-                        synthetic_sample=int(self.config.ttrl.n_samples_per_prompt/4)
+                        synthetic_rollout=int(self.config.actor_rollout_ref.rollout.n/4) #
+                        synthetic_sample=int(self.config.ttrl.n_samples_per_prompt/4) #
+                        
                         #Note: There is no groud-truth for r2q_gen_batch, it's also impossible to get majority voting for r2q_gen_batch (Diversified Synthetic Problems)
                         if not self.async_rollout_mode:
                             r2q_gen_batch_output_padded = self.actor_rollout_wg.generate_sequences(r2q_gen_batch_padded) 
@@ -1326,14 +1328,16 @@ class RayPPOTrainer:
                             #self.async_rollout_manager.wake_up()
                             r2q_gen_batch_output_padded = self.async_rollout_manager.generate_sequences(r2q_gen_batch_padded)
                             #self.async_rollout_manager.sleep()
-                        print('r2q_gen_batch_output', len(r2q_gen_batch_output_padded), len(r2q_batch))
+                        
                         r2q_gen_batch_output = unpad_dataproto(r2q_gen_batch_output_padded, pad_size=pad_size*synthetic_rollout) #Remove the "fill" data that was previously added for division
+                        
                         # pop the corresponding keys to match the r2q_gen_batch_output
                     
                         r2q_batch = r2q_batch.repeat(repeat_times=synthetic_rollout, interleave=True)
                         r2q_batch_keys_to_pop = ['prompts', 'responses', 'input_ids', 'attention_mask', 'position_ids']
                         r2q_non_tensor_batch_keys_to_pop = ["tools_kwargs"]
                         r2q_batch.pop(batch_keys=r2q_batch_keys_to_pop, non_tensor_batch_keys=r2q_non_tensor_batch_keys_to_pop)
+                        
                         r2q_batch = r2q_batch.union(r2q_gen_batch_output)
                     
                         print('##############################step3##############################')
@@ -1358,7 +1362,13 @@ class RayPPOTrainer:
                                     extract_question = response.split("</think>")[-1].split("****Reconstructed Question (in natural English):**\n\n")[1].split("\n\n")[0].strip("\n").strip(" ").strip("\n").strip(" ")
                             except:
                                 extract_question = "None"
-
+                            
+                            if len(extract_question)>300:
+                                extract_question = "None"
+                            if extract_question != "None":
+                                open('/personal/jiayu2026/code/TTVS/output_data/'+self.config.trainer.experiment_name.split('-')[-5]+'.txt', 'a').write(extract_question+'\n')
+                            #     print('synthetic question:',extract_question)
+                            
                             input_question = self.tokenizer.apply_chat_template([{"content": extract_question + self.train_dataloader.dataset.math_prompt, "role": "user"}], tokenize=False, add_generation_prompt=True, enable_thinking=False)
                             if extract_question is not "None" and len(self.tokenizer(input_question, add_special_tokens=False)['input_ids']) <= self.config.data.max_prompt_length:
                                 generate_questions_to_response_input.append(input_question)
@@ -1368,7 +1378,7 @@ class RayPPOTrainer:
                         if len(valid_index) == 0:
                             print("No valid and extractable synthetic problems, start next interation")
                             continue
-                    
+                
                         q2r_batch = q2r_batch.select_idxs(valid_index)
                         q2r_batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(q2r_batch.batch))], dtype=object)
                         q2r_model_inputs = self.tokenizer(generate_questions_to_response_input, return_tensors="pt", add_special_tokens=False, padding=True, truncation=True)
@@ -1405,12 +1415,12 @@ class RayPPOTrainer:
                             q2r_gen_batch_padded.meta_info["kwargs"] = {"n": synthetic_n} 
                             q2r_gen_batch_output_padded = self.actor_rollout_wg.generate_sequences(q2r_gen_batch_padded)
                             q2r_gen_batch_output = unpad_dataproto(q2r_gen_batch_output_padded, pad_size=pad_size*synthetic_n) #self.config.actor_rollout_ref.rollout.n
-                            print('q2r_gen_batch_output', len(q2r_gen_batch_output), len(q2r_batch),synthetic_n )
+                           
                             assert len(q2r_gen_batch_output) == len(q2r_batch) * synthetic_n #self.config.ttrl.n_votes_per_prompt
                         
                             q2r_batch = apply_ttrl_gt(q2r_batch, q2r_gen_batch_output, synthetic_n, self.tokenizer)
                             q2r_gen_batch_output = select_top_k_per_prompt(q2r_gen_batch_output, synthetic_n, synthetic_sample)
-                            print('q2r_gen_batch_output', len(q2r_gen_batch_output),  len(q2r_batch), synthetic_n)
+                            
                             assert len(q2r_gen_batch_output) == len(q2r_batch) * synthetic_sample #self.config.ttrl.n_samples_per_prompt
                         else:
                             if not self.async_rollout_mode:
@@ -1420,7 +1430,7 @@ class RayPPOTrainer:
                                 q2r_gen_batch_output_padded = self.async_rollout_manager.generate_sequences(q2r_gen_batch_padded)
                                 #self.async_rollout_manager.sleep()
                     
-                        #print('##############################unpad##############################')
+                        
                         # unpad
                         #q2r_batch = q2r_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                         q2r_batch = q2r_batch.repeat(repeat_times=synthetic_rollout, interleave=True)
@@ -1431,7 +1441,7 @@ class RayPPOTrainer:
                         meta_info_keys_to_pop = ["timing"]
                    
                         q2r_batch.pop(batch_keys=q2r_batch_keys_to_pop, non_tensor_batch_keys=q2r_non_tensor_batch_keys_to_pop, meta_info_keys=meta_info_keys_to_pop)
-                        print('q2r_batch', len(q2r_batch), len(q2r_gen_batch_output))
+                        
                         q2r_batch = q2r_batch.union(q2r_gen_batch_output)
 
                         with marked_timer("reward_step2", timing_raw):
@@ -1456,6 +1466,7 @@ class RayPPOTrainer:
                         ### filtering out synthetic problems with all wrong answers, adding reward tensor to the synthetic problems
                         r2q_index_remaining = []
                         for k in q2r_sample_accs.keys():
+                            
                             if self.config.actor_rollout_ref.rollout.n * self.config.data.positive_synthesis_acc_upper >= sum(q2r_sample_accs[k]) >= self.config.actor_rollout_ref.rollout.n * self.config.data.positive_synthesis_acc_lower:
                                 r2q_index_remaining.extend(np.where(q2r_batch.non_tensor_batch["uid"] == k)[0].tolist())
                         r2q_index_remaining = r2q_index_remaining[::self.config.actor_rollout_ref.rollout.n]
@@ -1477,25 +1488,36 @@ class RayPPOTrainer:
                         for id, uid in enumerate(r2q_batch.non_tensor_batch["uid"].tolist()):
                             if uid in r2q_uid_remaining:
                                 r2q_remaining.append(id)
+                        if len(r2q_remaining)%synthetic_sample!=0:
+                            r2q_remaining=r2q_remaining[:len(r2q_remaining)-len(r2q_remaining)%synthetic_sample]
+                        if len(r2q_remaining)>len(ori_q2r_training_index_remaining)//2:
+                            r2q_remaining=r2q_remaining[:len(ori_q2r_training_index_remaining)//2-(len(ori_q2r_training_index_remaining)//2)%synthetic_sample]
                         svs_metrics["SvS-Valid-Ratio/VPS-RL"] = np.round(len(r2q_remaining) * 100 / len(r2q_batch), 2).item()
 
                         # final remaining training set for q2r, remain thoses questions with 0.0 < acc < 1.0
                         q2r_remaining = []
-                    
-                        q2r_uid_remaining = [k for k in q2r_sample_accs.keys() if 1.0 > np.mean(q2r_sample_accs[k]) > 0.0]
+                        
+                        q2r_uid_remaining = [k for k in q2r_sample_accs.keys() if self.config.data.positive_synthesis_acc_upper > np.mean(q2r_sample_accs[k]) > self.config.data.under_performing_acc_lower]
                         for id, uid in enumerate(q2r_batch.non_tensor_batch["uid"].tolist()):
                             if uid in q2r_uid_remaining:
                                 q2r_remaining.append(id)
+                        
+                        if len(q2r_remaining)%synthetic_sample!=0:
+                            q2r_remaining=q2r_remaining[:len(q2r_remaining)-len(q2r_remaining)%synthetic_sample]
 
+                        if len(q2r_remaining)>len(ori_q2r_training_index_remaining)//2:
+                            q2r_remaining=q2r_remaining[:len(ori_q2r_training_index_remaining)//2-(len(ori_q2r_training_index_remaining)//2)%synthetic_sample]
                         svs_metrics["SvS-Valid-Ratio/SPA-RL"] = np.round(len(q2r_remaining) * 100 / len(q2r_batch), 2).item()
                         ### combining all the 1. initial answer generation, 2. response to question generation, 3. question to response generation into the training set
                         ans_final = batch.select_idxs(ori_q2r_training_index_remaining)
-
-                    if self.global_steps>=MixRollout_step:
-                        print('##############################stpe4##############################')
+                        q2r_batch_final = q2r_batch.select_idxs(q2r_remaining)
                     
+                    
+                    if self.global_steps>=MixRollout_step and len(q2r_batch_final)>0:
+                        print('##############################stpe4##############################')
+                        
                         batch_uid = batch.non_tensor_batch["ori_uid"]
-                        q2r_batch_uid = q2r_batch.non_tensor_batch["ori_uid"]
+                        q2r_batch_uid = q2r_batch_final.non_tensor_batch["ori_uid"]
 
                         intersection_elements = np.intersect1d(batch_uid, q2r_batch_uid)
                         mask = np.isin(batch_uid, q2r_batch_uid)
@@ -1522,45 +1544,49 @@ class RayPPOTrainer:
 
                         q2r_mix_gen_batch = DataProto.from_single_dict(q2r_gen_dict_mix)
 
-                        if repeat_sampling_sglang_grpo:
-                            q2r_mix_gen_batch = q2r_gen_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+                        # if repeat_sampling_sglang_grpo:
+                        #     q2r_mix_gen_batch = q2r_gen_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                         q2r_mix_gen_batch.meta_info = {"self_improve": True, "n": 1}
                         q2r_mix_gen_batch_padded, mix_pad_size = pad_dataproto_to_divisor(q2r_mix_gen_batch, self.actor_rollout_wg.world_size) 
-                        if repeat_sampling_sglang_grpo:
-                            batch_mix_gen_batch = batch_mix_gen_batch.repeat(repeat_times=synthetic_n, interleave=True)
+                        # if repeat_sampling_sglang_grpo:
+                        #     batch_mix_gen_batch = batch_mix_gen_batch.repeat(repeat_times=synthetic_n, interleave=True)
                         batch_mix_gen_batch.meta_info = {"self_improve": True, "n": 1}
                         batch_mix_gen_batch_padded, mix_pad_size = pad_dataproto_to_divisor(q2r_mix_gen_batch, self.actor_rollout_wg.world_size)
-
+                        mix_synthetic_n=synthetic_n
+                        mix_synthetic_sample=synthetic_sample
+                        mix_synthetic_rollout=synthetic_rollout
                         if self.config.get("ttrl", {}).get("enable", False):
-                            q2r_mix_gen_batch_padded.meta_info["kwargs"] = {"n": synthetic_n} 
+                            q2r_mix_gen_batch_padded.meta_info["kwargs"] = {"n": mix_synthetic_n} 
+                            #print('L1553', len(q2r_mix_gen_batch_padded), len(q2r_mix_gen_batch), len(q2r_batch_final))
                             q2r_mix_gen_batch_output_padded = self.actor_rollout_wg.generate_sequences(q2r_mix_gen_batch_padded)
                             q2r_mix_gen_batch_output = unpad_dataproto(q2r_mix_gen_batch_output_padded, pad_size=mix_pad_size*synthetic_rollout)
 
-                            batch_mix_gen_batch_padded.meta_info["kwargs"] = {"n": synthetic_n} 
+                            batch_mix_gen_batch_padded.meta_info["kwargs"] = {"n": mix_synthetic_n} 
                             batch_mix_gen_batch_output_padded = self.actor_rollout_wg.generate_sequences(batch_mix_gen_batch_padded)
                             batch_mix_gen_batch_output = unpad_dataproto(batch_mix_gen_batch_output_padded, pad_size=mix_pad_size*synthetic_rollout)
                         
-                            num_prompts = len(batch_mix_gen_batch_output) // synthetic_n #self.config.ttrl.n_samples_per_prompt
-                            print('batch_mix', len(batch_mix), num_prompts, len(q2r_mix_gen_batch_padded), len(batch_mix_gen_batch_output_padded))
+                            num_prompts = len(batch_mix_gen_batch_output) // mix_synthetic_n #self.config.ttrl.n_samples_per_prompt
+                            
                             assert len(batch_mix) == num_prompts
-                            half_n = int(synthetic_n*1/2)
+                            half_n = int(mix_synthetic_n*1/2)
                             for i in range(num_prompts):
-                                start = i*synthetic_n+half_n #i * self.config.ttrl.n_samples_per_prompt
-                                aug_start = i*synthetic_n+half_n
-                                for j in range(half_n, synthetic_n):
+                                start = i*mix_synthetic_n+half_n #i * self.config.ttrl.n_samples_per_prompt
+                                aug_start = i*mix_synthetic_n+half_n
+                                for j in range(half_n, mix_synthetic_n):
                                     if start + j>=len(batch_mix_gen_batch_output) or start + j-half_n>=len(q2r_mix_gen_batch_output):
-                                        #print('1548&&&&&&&&&&&&&&&&&&&&break&&&&&&&&&&&&&&&&&&&&')
+                                       
                                         break
                                     batch_mix_gen_batch_output[start + j].batch = q2r_mix_gen_batch_output[aug_start+j-half_n].batch
                                     batch_mix_gen_batch_output[start + j].non_tensor_batch = q2r_mix_gen_batch_output[aug_start+j-half_n].non_tensor_batch
                                     batch_mix_gen_batch_output[start + j].meta_info = q2r_mix_gen_batch_output[aug_start+j-half_n].meta_info
 
-                            print('batch_mix1', len(batch_mix_gen_batch_output), len(batch_mix), synthetic_n)
-                            assert len(batch_mix_gen_batch_output) == len(batch_mix) * synthetic_n
+                            
+                            assert len(batch_mix_gen_batch_output) == len(batch_mix) * mix_synthetic_n
                         
-                            batch_mix = apply_ttrl_gt(batch_mix, batch_mix_gen_batch_output, synthetic_n, self.tokenizer)
-                            batch_mix_gen_batch_output = select_top_k_per_prompt(batch_mix_gen_batch_output, synthetic_n, synthetic_sample,mixrollouts=True)
-                            assert len(batch_mix_gen_batch_output) == len(batch_mix) * synthetic_sample
+                            batch_mix = apply_ttrl_gt(batch_mix, batch_mix_gen_batch_output, mix_synthetic_n, self.tokenizer)
+                            batch_mix_gen_batch_output = select_top_k_per_prompt(batch_mix_gen_batch_output, mix_synthetic_n, mix_synthetic_sample,mixrollouts=True)
+                           
+                            assert len(batch_mix_gen_batch_output) == len(batch_mix) * mix_synthetic_sample
                         else:
                             if not self.async_rollout_mode:
                                 q2r_mix_gen_batch_output_padded = self.actor_rollout_wg.generate_sequences(q2r_mix_gen_batch_padded)
@@ -1571,12 +1597,12 @@ class RayPPOTrainer:
                                 batch_mix_gen_batch_output_padded = self.actor_rollout_wg.generate_sequences(batch_mix_gen_batch_padded)
                                 #self.async_rollout_manager.sleep()
 
-                        batch_mix = batch_mix.repeat(repeat_times=synthetic_rollout, interleave=True)
+                        batch_mix = batch_mix.repeat(repeat_times=mix_synthetic_rollout, interleave=True)
                     
                         batch_mix_keys_to_pop = ['prompts', 'responses', 'input_ids', 'attention_mask', 'position_ids', 'acc'] #
                         batch_mix_non_tensor_batch_keys_to_pop = ["tools_kwargs"]
                         batch_mix.pop(batch_keys=batch_mix_keys_to_pop, non_tensor_batch_keys=batch_mix_non_tensor_batch_keys_to_pop) #
-                        print('batch_mix', len(batch_mix), len(batch_mix_gen_batch_output))
+                        
                         batch_mix = batch_mix.union(batch_mix_gen_batch_output)
                     
 
@@ -1595,29 +1621,38 @@ class RayPPOTrainer:
                         
                         mix_sample_accs = {}
                         for idx in range(0, len(batch_mix.non_tensor_batch["uid"])):
-                            if batch_mix.non_tensor_batch["uid"][idx] not in batch_mix:
+                            if batch_mix.non_tensor_batch["uid"][idx] not in mix_sample_accs: ############revised
                                 mix_sample_accs[batch_mix.non_tensor_batch["uid"][idx]] = []
                             mix_sample_accs[batch_mix.non_tensor_batch["uid"][idx]].append(batch_mix.batch['acc'][idx].item())
                         mix_sample_accs = {k: np.mean(v).item() for k, v in mix_sample_accs.items()}
-                    
-                    
-                        print('mix calculation')
+                        
                         mix_remaining=[]
-                        #mix_uid_remaining = [k for k in mix_sample_accs.keys() if self.config.data.under_performing_acc_lower <= np.mean(mix_sample_accs[k]) <= self.config.data.positive_synthesis_acc_upper]
-                        mix_uid_remaining = [k for k in mix_sample_accs.keys() if 0.0625 < np.mean(mix_sample_accs[k]) < 0.875]
+                        mix_uid_remaining = [k for k in mix_sample_accs.keys() if self.config.data.under_performing_acc_lower < np.mean(mix_sample_accs[k]) < self.config.data.positive_synthesis_acc_upper]
+                        #mix_uid_remaining = [k for k in mix_sample_accs.keys() if 0.0 < np.mean(mix_sample_accs[k])<1.0]
+                        # print("threshold", self.config.data.under_performing_acc_lower, self.config.data.positive_synthesis_acc_upper)
+                        print('mix remaining', [f"{mix_sample_accs[k]}" for k in mix_sample_accs.keys()])
+                        
                         for id, uid in enumerate(batch_mix.non_tensor_batch["uid"].tolist()):
                             if uid in mix_uid_remaining:
                                 mix_remaining.append(id)
-                    
+                         
+                        if len(mix_remaining)%synthetic_sample!=0:
+                            mix_remaining=mix_remaining[:len(mix_remaining)-len(mix_remaining)%synthetic_sample]
+
+                        if len(mix_remaining)>len(ori_q2r_training_index_remaining)//2:
+                            mix_remaining=mix_remaining[:len(ori_q2r_training_index_remaining)//2-(len(ori_q2r_training_index_remaining))%synthetic_sample]
+
                         print('<<<<<<<<<<<<<<<<<<<<mix_index_remaining>>>>>>>>>>>>>>>>>>>>>>>>>>', len(mix_remaining))
                         batch_mix = batch_mix.select_idxs(mix_remaining)
+
 
                     if self.global_steps>=MixInput_step:
                         if self.config.data.get("r2q_training_ratio", 1.0) < 1.0:
                             r2q_remaining = random.sample(r2q_remaining, int(len(r2q_remaining) * self.config.data.r2q_training_ratio))
+                            
                         r2q_batch_final = r2q_batch.select_idxs(r2q_remaining)
-                        q2r_batch_final = q2r_batch.select_idxs(q2r_remaining)
-                        if self.global_steps>=MixRollout_step:
+                        
+                        if self.global_steps>=MixRollout_step and len(q2r_batch_final)>0:
                             print('<<<<<<<<<<<<<', len(ans_final), len(r2q_batch_final), len(q2r_batch_final), len(batch_mix), '<<<<<<<<<<<<<')
                             batch = DataProto.concat([ans_final, r2q_batch_final, q2r_batch_final, batch_mix])
                             svs_metrics['SvS-Valid-Ratio/Num-MIX'] = len(batch_mix)
@@ -1646,7 +1681,7 @@ class RayPPOTrainer:
                         ##################################################################################################
                  
                     # recompute old_log_probs
-                    print('global_steps after', self.global_steps)
+                    
                     with marked_timer("old_log_prob", timing_raw, color="blue"):
                         old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
                         entropys = old_log_prob.batch["entropys"]
@@ -1774,7 +1809,7 @@ class RayPPOTrainer:
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
                     if rollout_data_dir:
                         with marked_timer("dump_rollout_generations", timing_raw, color="green"):
-                            print(batch.batch.keys())
+                        
                             inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
                             outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
                             scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
