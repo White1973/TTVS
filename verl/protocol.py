@@ -78,6 +78,7 @@ def pad_dataproto_to_divisor(data: "DataProto", size_divisor: int):
         pad_size (int)
     """
     assert isinstance(data, DataProto), "data must be a DataProto"
+    
     if len(data) % size_divisor != 0:
         pad_size = size_divisor - len(data) % size_divisor
         padding_protos = []
@@ -92,6 +93,7 @@ def pad_dataproto_to_divisor(data: "DataProto", size_divisor: int):
             logging.warning("padding a DataProto with no item, no changed made")
         pad_size = 0
         data_padded = data
+    
     return data_padded, pad_size
 
 
@@ -725,6 +727,8 @@ class DataProto:
                 non_tensor_lst = np.array_split(val, chunk_indices.tolist())
             else:
                 non_tensor_lst = np.array_split(val, chunks)
+            if len(non_tensor_lst) != chunks:
+                print('error', len(non_tensor_lst),chunks, key, type(val))
             assert len(non_tensor_lst) == chunks
             for i in range(chunks):
                 non_tensor_batch_lst[i][key] = non_tensor_lst[i]
