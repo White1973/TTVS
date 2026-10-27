@@ -20,6 +20,7 @@ This trainer supports model-agonistic model initialization with huggingface
 
 import json
 import os
+import random
 import uuid
 from collections import defaultdict
 from copy import deepcopy
@@ -60,9 +61,15 @@ from verl.utils.metric import (
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
-from verl.trainer.ppo.ttrl_utils import select_top_k_per_prompt, apply_ttrl_gt
+from verl.trainer.ppo.ttvs_utils import (
+    TTVSVariant,
+    apply_ttvs_majority_gt,
+    build_full_cluster_plans,
+    compute_ttvs_metrics,
+    restore_ttvs_original_gt,
+    select_ttvs_rollouts,
+)
 
-import copy
 WorkerType = Type[Worker]
 
 
@@ -331,6 +338,7 @@ class RayPPOTrainer:
         self.tokenizer = tokenizer
         self.processor = processor
         self.config = config
+        self.ttvs = self._resolve_ttvs_config(config)
         self.reward_fn = reward_fn
         self.val_reward_fn = val_reward_fn
 
@@ -374,6 +382,146 @@ class RayPPOTrainer:
 
         self._validate_config()
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
+
+    @staticmethod
+    def _resolve_ttvs_config(config):
+        """Resolve the independent TTVS rollout contract.
+
+        ``ttvs`` is the canonical configuration namespace. The older ``ttrl``
+        key is accepted only as an input-configuration migration path. TTVS
+        never derives multiple rollout meanings from a hard-coded ``N / 4``.
+        """
+
+        ttvs = config.get("ttvs", None)
+        if ttvs is not None:
+            settings = {
+                "enable": bool(ttvs.get("enable", False)),
+                "label_vote_rollouts": int(ttvs.label_vote_rollouts),
+                "train_rollouts_per_query": int(ttvs.train_rollouts_per_query),
+                "generation_candidates": int(ttvs.synthesis.generation_candidates),
+                "num_variants_per_cluster": int(ttvs.synthesis.num_variants_per_cluster),
+                "ige_vote_rollouts_per_variant": int(ttvs.synthesis.ige_vote_rollouts_per_variant),
+                "ige_train_rollouts_per_variant": int(ttvs.synthesis.ige_train_rollouts_per_variant),
+                "train_synthesis_policy": bool(ttvs.synthesis.train_synthesis_policy),
+                "cge_enable": bool(ttvs.cge.enable),
+                "cge_total_rollouts": int(ttvs.cge.total_rollouts_per_cluster),
+                "cge_max_variants": int(ttvs.cge.max_variants_per_cluster),
+            }
+        else:
+            legacy = config.get("ttrl", {})
+            votes = int(legacy.get("n_votes_per_prompt", config.actor_rollout_ref.rollout.n))
+            samples = int(legacy.get("n_samples_per_prompt", config.actor_rollout_ref.rollout.n))
+            settings = {
+                "enable": bool(legacy.get("enable", False)),
+                "label_vote_rollouts": votes,
+                "train_rollouts_per_query": samples,
+                "generation_candidates": max(1, votes // 4),
+                "num_variants_per_cluster": 1,
+                "ige_vote_rollouts_per_variant": max(1, votes // 4),
+                "ige_train_rollouts_per_variant": max(1, samples // 4),
+                "train_synthesis_policy": True,
+                "cge_enable": True,
+                "cge_total_rollouts": max(1, samples // 4),
+                "cge_max_variants": 1,
+            }
+
+        positive_keys = (
+            "label_vote_rollouts",
+            "train_rollouts_per_query",
+            "generation_candidates",
+            "num_variants_per_cluster",
+            "ige_vote_rollouts_per_variant",
+            "ige_train_rollouts_per_variant",
+            "cge_total_rollouts",
+            "cge_max_variants",
+        )
+        if any(settings[key] <= 0 for key in positive_keys):
+            raise ValueError("All TTVS rollout and cluster sizes must be positive")
+        if settings["train_rollouts_per_query"] > settings["label_vote_rollouts"]:
+            raise ValueError("TTVS training rollouts cannot exceed label-vote rollouts")
+        if settings["ige_train_rollouts_per_variant"] > settings["ige_vote_rollouts_per_variant"]:
+            raise ValueError("TTVS variational-query training rollouts cannot exceed IGE votes")
+        return settings
+
+    def _generate_ttvs_full_cluster_outputs(
+        self,
+        plans,
+        original_prompt_batch,
+        variant_input_ids,
+        variant_attention_mask,
+        variant_position_ids,
+        variant_raw_prompt_ids,
+        variant_tools_kwargs,
+    ):
+        """Generate full-cluster CGE outputs under a fixed TTVS budget.
+
+        Requests with the same per-query allocation are batched together. The
+        returned order is cluster-major, so each contiguous block has exactly
+        ``cge_total_rollouts`` responses and one cross-query pseudo-label.
+        """
+
+        requests_by_count = defaultdict(list)
+        for plan_index, plan in enumerate(plans):
+            requests_by_count[plan.rollout_counts[0]].append(
+                (plan_index, "original", plan.original_prompt_index)
+            )
+            for variant, count in zip(plan.variants, plan.rollout_counts[1:]):
+                requests_by_count[count].append((plan_index, "variant", variant.prompt_index))
+
+        outputs_by_plan = defaultdict(list)
+        generated_rollouts = 0
+        for rollout_count, requests in requests_by_count.items():
+            input_ids = []
+            attention_masks = []
+            position_ids = []
+            raw_prompt_ids = []
+            tools_kwargs = []
+            for _, source, prompt_index in requests:
+                if source == "original":
+                    input_ids.append(original_prompt_batch.batch["input_ids"][prompt_index])
+                    attention_masks.append(original_prompt_batch.batch["attention_mask"][prompt_index])
+                    position_ids.append(original_prompt_batch.batch["position_ids"][prompt_index])
+                    raw_prompt_ids.append(original_prompt_batch.non_tensor_batch["raw_prompt_ids"][prompt_index])
+                    tools_kwargs.append(
+                        original_prompt_batch.non_tensor_batch.get(
+                            "tools_kwargs", np.asarray([{}] * len(original_prompt_batch), dtype=object)
+                        )[prompt_index]
+                    )
+                else:
+                    input_ids.append(variant_input_ids[prompt_index])
+                    attention_masks.append(variant_attention_mask[prompt_index])
+                    position_ids.append(variant_position_ids[prompt_index])
+                    raw_prompt_ids.append(variant_raw_prompt_ids[prompt_index])
+                    tools_kwargs.append(variant_tools_kwargs[prompt_index])
+
+            prompt_batch = DataProto.from_single_dict(
+                {
+                    "input_ids": torch.stack(input_ids),
+                    "attention_mask": torch.stack(attention_masks),
+                    "position_ids": torch.stack(position_ids),
+                    "raw_prompt_ids": np.asarray(raw_prompt_ids, dtype=object),
+                    "tools_kwargs": np.asarray(tools_kwargs, dtype=object),
+                }
+            )
+            prompt_batch.meta_info = {"ttvs_cge": True, "n": 1, "kwargs": {"n": rollout_count}}
+            padded, pad_size = pad_dataproto_to_divisor(prompt_batch, self.actor_rollout_wg.world_size)
+            padded.meta_info["kwargs"] = {"n": rollout_count}
+            generated_padded = self.actor_rollout_wg.generate_sequences(padded)
+            generated = unpad_dataproto(generated_padded, pad_size=pad_size * rollout_count)
+            if len(generated) != len(requests) * rollout_count:
+                raise RuntimeError("TTVS CGE rollout count does not match its allocation plan")
+
+            for request_index, (plan_index, _, _) in enumerate(requests):
+                start = request_index * rollout_count
+                outputs_by_plan[plan_index].append(generated.select_idxs(list(range(start, start + rollout_count))))
+            generated_rollouts += len(generated)
+
+        cluster_outputs = [DataProto.concat(outputs_by_plan[index]) for index in range(len(plans))]
+        outputs = DataProto.concat(cluster_outputs)
+        expected = len(plans) * self.ttvs["cge_total_rollouts"]
+        if len(outputs) != expected:
+            raise RuntimeError(f"TTVS full-cluster CGE generated {len(outputs)} rollouts; expected {expected}")
+        return outputs, generated_rollouts
     #Before officially starting expensive distributed training, a series of rigorous sanity checks are performed on the user-provided configuration file (self.config)
     def _validate_config(self):
         config = self.config
@@ -1081,6 +1229,18 @@ class RayPPOTrainer:
         progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
         MixRollout_step=self.config.data.mixrollout_step
         MixInput_step=self.config.data.mixinput_step
+        ttvs_enabled = self.ttvs["enable"]
+        label_vote_rollouts = self.ttvs["label_vote_rollouts"]
+        train_rollouts_per_query = self.ttvs["train_rollouts_per_query"]
+        variant_generation_candidates = self.ttvs["generation_candidates"]
+        variant_ige_votes = self.ttvs["ige_vote_rollouts_per_variant"]
+        variant_ige_samples = self.ttvs["ige_train_rollouts_per_variant"]
+
+        if ttvs_enabled and self.config.actor_rollout_ref.rollout.n != train_rollouts_per_query:
+            raise ValueError(
+                "TTVS actor_rollout_ref.rollout.n must equal ttvs.train_rollouts_per_query "
+                f"({self.config.actor_rollout_ref.rollout.n} != {train_rollouts_per_query})"
+            )
 
 
         # we start from step 1
@@ -1092,7 +1252,6 @@ class RayPPOTrainer:
             self.config.actor_rollout_ref.rollout.name == "sglang"
             and self.config.actor_rollout_ref.rollout.multi_turn.enable
         )
-        index_list = []
         for epoch in range(self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
                 do_profile = (                   
@@ -1112,13 +1271,16 @@ class RayPPOTrainer:
                 metrics = {}
                 timing_raw = {}
                 batch: DataProto = DataProto.from_single_dict(batch_dict) #The original dictionary is converted into a structured DataProto object to facilitate subsequent access to data in a unified way.
+                # TTVS keeps semantic-cluster identity separate from the GRPO
+                # group uid. IGE groups by query_id; CGE groups by cluster_id.
+                cluster_ids = np.asarray([str(uuid.uuid4()) for _ in range(len(batch))], dtype=object)
+                original_query_ids = np.asarray([f"{cluster_id}:original" for cluster_id in cluster_ids], dtype=object)
+                batch.non_tensor_batch["cluster_id"] = cluster_ids
+                batch.non_tensor_batch["query_id"] = original_query_ids
 
                 batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
                 #batch_keys_to_pop_aug = ["input_ids_aug", "attention_mask_aug", "position_ids_aug"]
                 
-                index_list = [int(index.split('-')[-1]) for index in batch_dict["index"].tolist()]
-                # index_list.extend(int_list)
-                 
                 non_tensor_batch_keys_to_pop = ["raw_prompt_ids"]
                 #The code will check whether there are optional data such as multi_modal_data, raw_prompt, tools_kwargs, etc. in the batch. If present, add their key names to the non_tensor_batch_keys_to_pop list.
                 if "multi_modal_data" in batch.non_tensor_batch:
@@ -1135,6 +1297,8 @@ class RayPPOTrainer:
                     batch_keys=batch_keys_to_pop,
                     non_tensor_batch_keys=non_tensor_batch_keys_to_pop,  #gen_batch typically contains the data needed for the rollout phase (e.g., input_ids), while batch retains the data needed for the training phase (e.g., full prompts and labels)
                 )
+                gen_batch.non_tensor_batch["cluster_id"] = cluster_ids.copy()
+                gen_batch.non_tensor_batch["query_id"] = original_query_ids.copy()
                 
                 if repeat_sampling_sglang_grpo: #False
                     uids_for_prompts = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object)
@@ -1149,16 +1313,20 @@ class RayPPOTrainer:
                 with marked_timer("step", timing_raw):
                     # generate a batch
                     with marked_timer("gen", timing_raw, color="red"):
-                        if self.config.get("ttrl", {}).get("enable", False):
+                        if ttvs_enabled:
                             
-                            gen_batch.meta_info["kwargs"] = {"n": self.config.ttrl.n_votes_per_prompt} 
+                            gen_batch.meta_info["kwargs"] = {"n": label_vote_rollouts}
                             gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
 
-                            assert len(gen_batch_output) == len(batch) * self.config.ttrl.n_votes_per_prompt
-                            batch = apply_ttrl_gt(batch, gen_batch_output, self.config.ttrl.n_votes_per_prompt, self.tokenizer)
-                            gen_batch_output = select_top_k_per_prompt(gen_batch_output, self.config.ttrl.n_votes_per_prompt, self.config.ttrl.n_samples_per_prompt, index_list)
+                            assert len(gen_batch_output) == len(batch) * label_vote_rollouts
+                            batch = apply_ttvs_majority_gt(batch, gen_batch_output, label_vote_rollouts, self.tokenizer)
+                            gen_batch_output = select_ttvs_rollouts(
+                                gen_batch_output,
+                                label_vote_rollouts,
+                                train_rollouts_per_query,
+                            )
 
-                            assert len(gen_batch_output) == len(batch) * self.config.ttrl.n_samples_per_prompt ##### ????
+                            assert len(gen_batch_output) == len(batch) * train_rollouts_per_query
                         else:
                             if not self.async_rollout_mode:
                                 gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch) #blocking operation, the program will wait for all sequences to be generated before continuing
@@ -1186,9 +1354,9 @@ class RayPPOTrainer:
                             del gen_baseline_batch, gen_baseline_output
 
                     if not repeat_sampling_sglang_grpo:
-                        batch.non_tensor_batch["uid"] = np.array(
-                            [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
-                        )
+                        # Original-query IGE uses one GRPO uid per query while
+                        # preserving cluster_id for later full-cluster CGE.
+                        batch.non_tensor_batch["uid"] = batch.non_tensor_batch["query_id"].copy()
                         #uid_list=batch.non_tensor_batch["uid"].tolist()
                         # repeat to align with repeated responses in rollout: In a standard PPO process, n different responses are typically generated for each prompt. Therefore, the original prompt data also needs to be replicated n times to match the number of responses. batch.repeat(...) does exactly this, ensuring that each generated token has its corresponding prompt context.
                         batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
@@ -1264,7 +1432,10 @@ class RayPPOTrainer:
                         ori_r2q_batch_len = len(r2q_batch.batch)
                         responses_strs = self.tokenizer.batch_decode(r2q_batch.batch['responses'], skip_special_tokens=True)
                         responses_strs=[response if len(response)<=self.config.data.max_prompt_length else response[-self.config.data.max_prompt_length:] for response in responses_strs]
-                        response_to_question_input = [self.tokenizer.apply_chat_template([{"content": self.response_to_question_prompt.format(QUESTION=batch.non_tensor_batch["raw_prompt"][index], RESPONSE=response), "role": "user"}], tokenize=False, add_generation_prompt=True, enable_thinking=False) for index, response in enumerate(responses_strs)]
+                        # r2q_batch is a filtered view of batch. Read the question from the
+                        # same filtered view so each selected response stays paired with its
+                        # originating question.
+                        response_to_question_input = [self.tokenizer.apply_chat_template([{"content": self.response_to_question_prompt.format(QUESTION=r2q_batch.non_tensor_batch["raw_prompt"][index], RESPONSE=response), "role": "user"}], tokenize=False, add_generation_prompt=True, enable_thinking=False) for index, response in enumerate(responses_strs)]
                         #response_to_question_input = [self.tokenizer.apply_chat_template([{"content": self.response_to_question_prompt.replace(r"{REPLACE}", response), "role": "user"}], tokenize=False, add_generation_prompt=True) for response in responses_strs]
                         
                         response_to_question_input_tokens = self.tokenizer.batch_encode_plus(response_to_question_input, add_special_tokens=False).input_ids
@@ -1311,16 +1482,14 @@ class RayPPOTrainer:
                         if repeat_sampling_sglang_grpo:
                             r2q_gen_batch = r2q_gen_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                         r2q_gen_batch.meta_info = {"r2q": True, "temperature": self.config.actor_rollout_ref.rollout.non_think_temperature, "top_p": self.config.actor_rollout_ref.rollout.non_think_top_p, "n": 1}
-                        synthetic_n = int(self.config.ttrl.n_votes_per_prompt/4) #
-                        r2q_gen_batch.meta_info["kwargs"] = {"n": int(synthetic_n)} 
+                        # TTVS variant generation is an explicit semantic count,
+                        # independent of IGE voting and CGE rollout budgets.
+                        r2q_gen_batch.meta_info["kwargs"] = {"n": variant_generation_candidates}
                         
                         r2q_gen_batch_padded, pad_size = pad_dataproto_to_divisor(r2q_gen_batch, self.actor_rollout_wg.world_size) #In distributed training, it is often required that the batch size be divisible by the number of working nodes (GPUs). This line of code fulfills this requirement by adding temporary "padding" data
                         
                     
                         ###########################################
-                        synthetic_rollout=int(self.config.actor_rollout_ref.rollout.n/4) #
-                        synthetic_sample=int(self.config.ttrl.n_samples_per_prompt/4) #
-                        
                         #Note: There is no groud-truth for r2q_gen_batch, it's also impossible to get majority voting for r2q_gen_batch (Diversified Synthetic Problems)
                         if not self.async_rollout_mode:
                             r2q_gen_batch_output_padded = self.actor_rollout_wg.generate_sequences(r2q_gen_batch_padded) 
@@ -1329,11 +1498,15 @@ class RayPPOTrainer:
                             r2q_gen_batch_output_padded = self.async_rollout_manager.generate_sequences(r2q_gen_batch_padded)
                             #self.async_rollout_manager.sleep()
                         
-                        r2q_gen_batch_output = unpad_dataproto(r2q_gen_batch_output_padded, pad_size=pad_size*synthetic_rollout) #Remove the "fill" data that was previously added for division
+                        r2q_gen_batch_output = unpad_dataproto(
+                            r2q_gen_batch_output_padded,
+                            pad_size=pad_size * variant_generation_candidates,
+                        )
+                        assert len(r2q_gen_batch_output) == len(r2q_batch) * variant_generation_candidates
                         
                         # pop the corresponding keys to match the r2q_gen_batch_output
                     
-                        r2q_batch = r2q_batch.repeat(repeat_times=synthetic_rollout, interleave=True)
+                        r2q_batch = r2q_batch.repeat(repeat_times=variant_generation_candidates, interleave=True)
                         r2q_batch_keys_to_pop = ['prompts', 'responses', 'input_ids', 'attention_mask', 'position_ids']
                         r2q_non_tensor_batch_keys_to_pop = ["tools_kwargs"]
                         r2q_batch.pop(batch_keys=r2q_batch_keys_to_pop, non_tensor_batch_keys=r2q_non_tensor_batch_keys_to_pop)
@@ -1365,12 +1538,16 @@ class RayPPOTrainer:
                             
                             if len(extract_question)>300:
                                 extract_question = "None"
-                            if extract_question != "None":
-                                open('/personal/jiayu2026/code/TTVS/output_data/'+self.config.trainer.experiment_name.split('-')[-5]+'.txt', 'a').write(extract_question+'\n')
+                            synthetic_data_dir = self.config.trainer.get("synthetic_data_dir", None)
+                            if extract_question != "None" and synthetic_data_dir:
+                                os.makedirs(synthetic_data_dir, exist_ok=True)
+                                output_name = f"{self.config.trainer.experiment_name}.txt"
+                                with open(os.path.join(synthetic_data_dir, output_name), "a", encoding="utf-8") as output_file:
+                                    output_file.write(extract_question + "\n")
                             #     print('synthetic question:',extract_question)
                             
                             input_question = self.tokenizer.apply_chat_template([{"content": extract_question + self.train_dataloader.dataset.math_prompt, "role": "user"}], tokenize=False, add_generation_prompt=True, enable_thinking=False)
-                            if extract_question is not "None" and len(self.tokenizer(input_question, add_special_tokens=False)['input_ids']) <= self.config.data.max_prompt_length:
+                            if extract_question != "None" and len(self.tokenizer(input_question, add_special_tokens=False)['input_ids']) <= self.config.data.max_prompt_length:
                                 generate_questions_to_response_input.append(input_question)
                                 valid_index.append(id)
                     
@@ -1380,7 +1557,12 @@ class RayPPOTrainer:
                             continue
                 
                         q2r_batch = q2r_batch.select_idxs(valid_index)
-                        q2r_batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(q2r_batch.batch))], dtype=object)
+                        variant_query_ids = np.asarray([str(uuid.uuid4()) for _ in range(len(q2r_batch))], dtype=object)
+                        q2r_batch.non_tensor_batch["uid"] = variant_query_ids.copy()
+                        q2r_batch.non_tensor_batch["query_id"] = variant_query_ids
+                        # TTVS preserves the prompt row across IGE filtering so
+                        # full-cluster CGE can regenerate every selected variant.
+                        q2r_batch.non_tensor_batch["synthetic_prompt_index"] = np.arange(len(q2r_batch), dtype=np.int64)
                         q2r_model_inputs = self.tokenizer(generate_questions_to_response_input, return_tensors="pt", add_special_tokens=False, padding=True, truncation=True)
                         q2r_input_ids = q2r_model_inputs.pop("input_ids")
                         q2r_attention_mask = q2r_model_inputs.pop("attention_mask")
@@ -1410,18 +1592,29 @@ class RayPPOTrainer:
                         # pad to be divisible by dp_size
                         q2r_gen_batch_padded, pad_size = pad_dataproto_to_divisor(q2r_gen_batch, self.actor_rollout_wg.world_size) 
 
-                        if self.config.get("ttrl", {}).get("enable", False):
-                            #q2r_gen_batch_padded.meta_info["kwargs"] = {"n": self.config.ttrl.n_votes_per_prompt} 
-                            q2r_gen_batch_padded.meta_info["kwargs"] = {"n": synthetic_n} 
+                        if ttvs_enabled:
+                            q2r_gen_batch_padded.meta_info["kwargs"] = {"n": variant_ige_votes}
                             q2r_gen_batch_output_padded = self.actor_rollout_wg.generate_sequences(q2r_gen_batch_padded)
-                            q2r_gen_batch_output = unpad_dataproto(q2r_gen_batch_output_padded, pad_size=pad_size*synthetic_n) #self.config.actor_rollout_ref.rollout.n
+                            q2r_gen_batch_output = unpad_dataproto(
+                                q2r_gen_batch_output_padded,
+                                pad_size=pad_size * variant_ige_votes,
+                            )
                            
-                            assert len(q2r_gen_batch_output) == len(q2r_batch) * synthetic_n #self.config.ttrl.n_votes_per_prompt
+                            assert len(q2r_gen_batch_output) == len(q2r_batch) * variant_ige_votes
                         
-                            q2r_batch = apply_ttrl_gt(q2r_batch, q2r_gen_batch_output, synthetic_n, self.tokenizer)
-                            q2r_gen_batch_output = select_top_k_per_prompt(q2r_gen_batch_output, synthetic_n, synthetic_sample)
+                            q2r_batch = apply_ttvs_majority_gt(
+                                q2r_batch,
+                                q2r_gen_batch_output,
+                                variant_ige_votes,
+                                self.tokenizer,
+                            )
+                            q2r_gen_batch_output = select_ttvs_rollouts(
+                                q2r_gen_batch_output,
+                                variant_ige_votes,
+                                variant_ige_samples,
+                            )
                             
-                            assert len(q2r_gen_batch_output) == len(q2r_batch) * synthetic_sample #self.config.ttrl.n_samples_per_prompt
+                            assert len(q2r_gen_batch_output) == len(q2r_batch) * variant_ige_samples
                         else:
                             if not self.async_rollout_mode:
                                 q2r_gen_batch_output_padded = self.actor_rollout_wg.generate_sequences(q2r_gen_batch_padded) #Synthesized question batches q2r_gen_batch_padded are sent to the model, which performs the generation task and outputs answers to these questions.
@@ -1433,7 +1626,7 @@ class RayPPOTrainer:
                         
                         # unpad
                         #q2r_batch = q2r_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
-                        q2r_batch = q2r_batch.repeat(repeat_times=synthetic_rollout, interleave=True)
+                        q2r_batch = q2r_batch.repeat(repeat_times=variant_ige_samples, interleave=True)
 
                         # pop the corresponding keys to match the q2r_gen_batch_output
                         q2r_batch_keys_to_pop = ['prompts', 'responses', 'input_ids', 'attention_mask', 'position_ids']
@@ -1464,13 +1657,24 @@ class RayPPOTrainer:
                             q2r_sample_accs[q2r_batch.non_tensor_batch["uid"][idx]].append(q2r_batch.batch['acc'][idx].item())
 
                         ### filtering out synthetic problems with all wrong answers, adding reward tensor to the synthetic problems
-                        r2q_index_remaining = []
-                        for k in q2r_sample_accs.keys():
-                            
-                            if self.config.actor_rollout_ref.rollout.n * self.config.data.positive_synthesis_acc_upper >= sum(q2r_sample_accs[k]) >= self.config.actor_rollout_ref.rollout.n * self.config.data.positive_synthesis_acc_lower:
-                                r2q_index_remaining.extend(np.where(q2r_batch.non_tensor_batch["uid"] == k)[0].tolist())
-                        r2q_index_remaining = r2q_index_remaining[::self.config.actor_rollout_ref.rollout.n]
-                        r2q_index_remaining = [valid_index[int(x / self.config.actor_rollout_ref.rollout.n)] for x in r2q_index_remaining]
+                        accepted_q2r_prompt_indices = []
+                        for prompt_index, scores in enumerate(q2r_sample_accs.values()):
+                            if len(scores) != variant_ige_samples:
+                                raise RuntimeError(
+                                    f"TTVS IGE group has {len(scores)} samples; expected {variant_ige_samples}."
+                                )
+                            group_accuracy = float(np.mean(scores))
+                            if (
+                                self.config.data.positive_synthesis_acc_lower
+                                <= group_accuracy
+                                <= self.config.data.positive_synthesis_acc_upper
+                            ):
+                                accepted_q2r_prompt_indices.append(prompt_index)
+
+                        # Each q2r prompt came from one valid r2q trajectory. Map accepted
+                        # prompt groups back through valid_index instead of using rollout.n
+                        # as a stride (synthetic groups are smaller than original groups).
+                        r2q_index_remaining = [valid_index[index] for index in accepted_q2r_prompt_indices]
                         r2q_uid_remaining = [r2q_batch.non_tensor_batch["uid"][x] for x in r2q_index_remaining]
                         r2q_valid_response_length = r2q_batch.batch["attention_mask"][:, r2q_batch.batch["prompts"].shape[-1]:].sum(dim=-1)
                     
@@ -1488,10 +1692,10 @@ class RayPPOTrainer:
                         for id, uid in enumerate(r2q_batch.non_tensor_batch["uid"].tolist()):
                             if uid in r2q_uid_remaining:
                                 r2q_remaining.append(id)
-                        if len(r2q_remaining)%synthetic_sample!=0:
-                            r2q_remaining=r2q_remaining[:len(r2q_remaining)-len(r2q_remaining)%synthetic_sample]
+                        if len(r2q_remaining)%variant_generation_candidates!=0:
+                            r2q_remaining=r2q_remaining[:len(r2q_remaining)-len(r2q_remaining)%variant_generation_candidates]
                         if len(r2q_remaining)>len(ori_q2r_training_index_remaining)//2:
-                            r2q_remaining=r2q_remaining[:len(ori_q2r_training_index_remaining)//2-(len(ori_q2r_training_index_remaining)//2)%synthetic_sample]
+                            r2q_remaining=r2q_remaining[:len(ori_q2r_training_index_remaining)//2-(len(ori_q2r_training_index_remaining)//2)%variant_generation_candidates]
                         svs_metrics["SvS-Valid-Ratio/VPS-RL"] = np.round(len(r2q_remaining) * 100 / len(r2q_batch), 2).item()
 
                         # final remaining training set for q2r, remain thoses questions with 0.0 < acc < 1.0
@@ -1502,148 +1706,123 @@ class RayPPOTrainer:
                             if uid in q2r_uid_remaining:
                                 q2r_remaining.append(id)
                         
-                        if len(q2r_remaining)%synthetic_sample!=0:
-                            q2r_remaining=q2r_remaining[:len(q2r_remaining)-len(q2r_remaining)%synthetic_sample]
+                        if len(q2r_remaining)%variant_ige_samples!=0:
+                            q2r_remaining=q2r_remaining[:len(q2r_remaining)-len(q2r_remaining)%variant_ige_samples]
 
                         if len(q2r_remaining)>len(ori_q2r_training_index_remaining)//2:
-                            q2r_remaining=q2r_remaining[:len(ori_q2r_training_index_remaining)//2-(len(ori_q2r_training_index_remaining)//2)%synthetic_sample]
+                            q2r_remaining=q2r_remaining[:len(ori_q2r_training_index_remaining)//2-(len(ori_q2r_training_index_remaining)//2)%variant_ige_samples]
                         svs_metrics["SvS-Valid-Ratio/SPA-RL"] = np.round(len(q2r_remaining) * 100 / len(q2r_batch), 2).item()
                         ### combining all the 1. initial answer generation, 2. response to question generation, 3. question to response generation into the training set
                         ans_final = batch.select_idxs(ori_q2r_training_index_remaining)
                         q2r_batch_final = q2r_batch.select_idxs(q2r_remaining)
                     
                     
-                    if self.global_steps>=MixRollout_step and len(q2r_batch_final)>0:
-                        print('##############################stpe4##############################')
-                        
-                        batch_uid = batch.non_tensor_batch["ori_uid"]
-                        q2r_batch_uid = q2r_batch_final.non_tensor_batch["ori_uid"]
+                    batch_cge = None
+                    if (
+                        self.global_steps >= MixInput_step
+                        and self.global_steps >= MixRollout_step
+                        and self.ttvs["cge_enable"]
+                        and len(q2r_batch_final) > 0
+                    ):
+                        # TTVS full-cluster CGE treats an original query and
+                        # its selected variational queries as one semantic
+                        # cluster. Its fixed rollout budget is distributed
+                        # across every query in that cluster before voting.
+                        variants = [
+                            TTVSVariant(
+                                cluster_id=q2r_batch_final.non_tensor_batch["cluster_id"][index],
+                                query_id=q2r_batch_final.non_tensor_batch["query_id"][index],
+                                prompt_index=int(
+                                    q2r_batch_final.non_tensor_batch["synthetic_prompt_index"][index]
+                                ),
+                            )
+                            for index in range(len(q2r_batch_final))
+                        ]
+                        plans = build_full_cluster_plans(
+                            gen_batch.non_tensor_batch["cluster_id"].tolist(),
+                            variants,
+                            total_rollouts=self.ttvs["cge_total_rollouts"],
+                            max_variants_per_cluster=min(
+                                self.ttvs["cge_max_variants"],
+                                self.ttvs["num_variants_per_cluster"],
+                            ),
+                        )
 
-                        intersection_elements = np.intersect1d(batch_uid, q2r_batch_uid)
-                        mask = np.isin(batch_uid, q2r_batch_uid)
-                        intersectio_indices = np.where(mask)[0]
-                        values_in_arr1 = batch_uid[intersectio_indices]
+                        if plans:
+                            cge_outputs, generated_count = self._generate_ttvs_full_cluster_outputs(
+                                plans,
+                                gen_batch,
+                                q2r_input_ids,
+                                q2r_attention_mask,
+                                q2r_position_ids,
+                                q2r_raw_prompt_ids,
+                                q2r_tools_kwargs,
+                            )
+                            base_indices = [
+                                int(np.flatnonzero(batch.non_tensor_batch["cluster_id"] == plan.cluster_id)[0])
+                                for plan in plans
+                            ]
+                            batch_cge = batch.select_idxs(base_indices)
+                            cge_uids = np.asarray(
+                                [f"{plan.cluster_id}:cge" for plan in plans], dtype=object
+                            )
+                            batch_cge.non_tensor_batch["uid"] = cge_uids
+                            batch_cge.non_tensor_batch["query_id"] = cge_uids.copy()
+                            batch_cge = apply_ttvs_majority_gt(
+                                batch_cge,
+                                cge_outputs,
+                                self.ttvs["cge_total_rollouts"],
+                                self.tokenizer,
+                            )
+                            batch_cge = batch_cge.repeat(
+                                repeat_times=self.ttvs["cge_total_rollouts"], interleave=True
+                            )
 
-                        batch_mix = batch.select_idxs(intersectio_indices)
-                        batch_mix.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch_mix.batch))], dtype=object)
-                    
-                        unique_vals_arr2, first_indices_arr2 = np.unique(q2r_batch_uid, return_index=True)
-                        lookup_positions = np.searchsorted(unique_vals_arr2, values_in_arr1)
-                        corresponding_indices_in_arr2 = first_indices_arr2[lookup_positions]
+                            batch_keys_to_remove = [
+                                key
+                                for key in ("prompts", "responses", "input_ids", "attention_mask", "position_ids", "acc")
+                                if key in batch_cge.batch
+                            ]
+                            non_tensor_keys_to_remove = [
+                                key for key in ("tools_kwargs",) if key in batch_cge.non_tensor_batch
+                            ]
+                            batch_cge.pop(
+                                batch_keys=batch_keys_to_remove,
+                                non_tensor_batch_keys=non_tensor_keys_to_remove,
+                            )
+                            batch_cge = batch_cge.union(cge_outputs)
+                            if "response_mask" not in batch_cge.batch:
+                                batch_cge.batch["response_mask"] = compute_response_mask(batch_cge)
 
-                        q2r_batch_mix = q2r_batch.select_idxs(corresponding_indices_in_arr2)
-                        gen_batch = gen_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
-                        batch_mix_gen_batch=gen_batch.select_idxs(intersectio_indices)
+                            with marked_timer("reward_ttvs_cge", timing_raw):
+                                if self.use_rm:
+                                    rm_scores = self.rm_wg.compute_rm_score(batch_cge)
+                                    batch_cge = batch_cge.union(rm_scores)
+                                cge_reward, _ = compute_reward(batch_cge, self.reward_fn)
+                                batch_cge.batch["reward_tensor"] = cge_reward
 
-                        corresponding_indices_in_arr2_list = [int(item/self.config.actor_rollout_ref.rollout.n) for item in corresponding_indices_in_arr2.tolist()]
-                        q2r_gen_dict_mix = {"input_ids": q2r_input_ids[corresponding_indices_in_arr2_list],
-                                    "attention_mask": q2r_attention_mask[corresponding_indices_in_arr2_list],
-                                    "position_ids": q2r_position_ids[corresponding_indices_in_arr2_list],
-                                    "raw_prompt_ids": q2r_raw_prompt_ids[corresponding_indices_in_arr2_list],
-                                    "tools_kwargs": q2r_tools_kwargs[corresponding_indices_in_arr2_list]}
-
-                        q2r_mix_gen_batch = DataProto.from_single_dict(q2r_gen_dict_mix)
-
-                        # if repeat_sampling_sglang_grpo:
-                        #     q2r_mix_gen_batch = q2r_gen_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
-                        q2r_mix_gen_batch.meta_info = {"self_improve": True, "n": 1}
-                        q2r_mix_gen_batch_padded, mix_pad_size = pad_dataproto_to_divisor(q2r_mix_gen_batch, self.actor_rollout_wg.world_size) 
-                        # if repeat_sampling_sglang_grpo:
-                        #     batch_mix_gen_batch = batch_mix_gen_batch.repeat(repeat_times=synthetic_n, interleave=True)
-                        batch_mix_gen_batch.meta_info = {"self_improve": True, "n": 1}
-                        batch_mix_gen_batch_padded, mix_pad_size = pad_dataproto_to_divisor(q2r_mix_gen_batch, self.actor_rollout_wg.world_size)
-                        mix_synthetic_n=synthetic_n
-                        mix_synthetic_sample=synthetic_sample
-                        mix_synthetic_rollout=synthetic_rollout
-                        if self.config.get("ttrl", {}).get("enable", False):
-                            q2r_mix_gen_batch_padded.meta_info["kwargs"] = {"n": mix_synthetic_n} 
-                            #print('L1553', len(q2r_mix_gen_batch_padded), len(q2r_mix_gen_batch), len(q2r_batch_final))
-                            q2r_mix_gen_batch_output_padded = self.actor_rollout_wg.generate_sequences(q2r_mix_gen_batch_padded)
-                            q2r_mix_gen_batch_output = unpad_dataproto(q2r_mix_gen_batch_output_padded, pad_size=mix_pad_size*synthetic_rollout)
-
-                            batch_mix_gen_batch_padded.meta_info["kwargs"] = {"n": mix_synthetic_n} 
-                            batch_mix_gen_batch_output_padded = self.actor_rollout_wg.generate_sequences(batch_mix_gen_batch_padded)
-                            batch_mix_gen_batch_output = unpad_dataproto(batch_mix_gen_batch_output_padded, pad_size=mix_pad_size*synthetic_rollout)
-                        
-                            num_prompts = len(batch_mix_gen_batch_output) // mix_synthetic_n #self.config.ttrl.n_samples_per_prompt
-                            
-                            assert len(batch_mix) == num_prompts
-                            half_n = int(mix_synthetic_n*1/2)
-                            for i in range(num_prompts):
-                                start = i*mix_synthetic_n+half_n #i * self.config.ttrl.n_samples_per_prompt
-                                aug_start = i*mix_synthetic_n+half_n
-                                for j in range(half_n, mix_synthetic_n):
-                                    if start + j>=len(batch_mix_gen_batch_output) or start + j-half_n>=len(q2r_mix_gen_batch_output):
-                                       
-                                        break
-                                    batch_mix_gen_batch_output[start + j].batch = q2r_mix_gen_batch_output[aug_start+j-half_n].batch
-                                    batch_mix_gen_batch_output[start + j].non_tensor_batch = q2r_mix_gen_batch_output[aug_start+j-half_n].non_tensor_batch
-                                    batch_mix_gen_batch_output[start + j].meta_info = q2r_mix_gen_batch_output[aug_start+j-half_n].meta_info
-
-                            
-                            assert len(batch_mix_gen_batch_output) == len(batch_mix) * mix_synthetic_n
-                        
-                            batch_mix = apply_ttrl_gt(batch_mix, batch_mix_gen_batch_output, mix_synthetic_n, self.tokenizer)
-                            batch_mix_gen_batch_output = select_top_k_per_prompt(batch_mix_gen_batch_output, mix_synthetic_n, mix_synthetic_sample,mixrollouts=True)
-                           
-                            assert len(batch_mix_gen_batch_output) == len(batch_mix) * mix_synthetic_sample
-                        else:
-                            if not self.async_rollout_mode:
-                                q2r_mix_gen_batch_output_padded = self.actor_rollout_wg.generate_sequences(q2r_mix_gen_batch_padded)
-                                batch_mix_gen_batch_output_padded = self.actor_rollout_wg.generate_sequences(batch_mix_gen_batch_padded) #Synthesized question batches q2r_gen_batch_padded are sent to the model, which performs the generation task and outputs answers to these questions.
-                            else:
-                                #self.async_rollout_manager.wake_up()
-                                q2r_mix_gen_batch_output_padded = self.async_rollout_manager.generate_sequences(q2r_mix_gen_batch_padded)
-                                batch_mix_gen_batch_output_padded = self.actor_rollout_wg.generate_sequences(batch_mix_gen_batch_padded)
-                                #self.async_rollout_manager.sleep()
-
-                        batch_mix = batch_mix.repeat(repeat_times=mix_synthetic_rollout, interleave=True)
-                    
-                        batch_mix_keys_to_pop = ['prompts', 'responses', 'input_ids', 'attention_mask', 'position_ids', 'acc'] #
-                        batch_mix_non_tensor_batch_keys_to_pop = ["tools_kwargs"]
-                        batch_mix.pop(batch_keys=batch_mix_keys_to_pop, non_tensor_batch_keys=batch_mix_non_tensor_batch_keys_to_pop) #
-                        
-                        batch_mix = batch_mix.union(batch_mix_gen_batch_output)
-                    
-
-                        with marked_timer("reward_step3", timing_raw):
-                            # compute reward model score
-                            if self.use_rm:
-                                reward_tensor = self.rm_wg.compute_rm_score(batch_mix)
-                                batch_mix = batch_mix.union(reward_tensor)
-
-                            if self.config.reward_model.launch_reward_fn_async:
-                                future_reward = compute_reward_async.remote(batch_mix, self.config, self.tokenizer)
-                            else:
-                                reward_tensor, reward_extra_infos_dict = compute_reward(batch_mix, self.reward_fn)
-                            batch_mix.batch['reward_tensor'] = reward_tensor
-
-                        
-                        mix_sample_accs = {}
-                        for idx in range(0, len(batch_mix.non_tensor_batch["uid"])):
-                            if batch_mix.non_tensor_batch["uid"][idx] not in mix_sample_accs: ############revised
-                                mix_sample_accs[batch_mix.non_tensor_batch["uid"][idx]] = []
-                            mix_sample_accs[batch_mix.non_tensor_batch["uid"][idx]].append(batch_mix.batch['acc'][idx].item())
-                        mix_sample_accs = {k: np.mean(v).item() for k, v in mix_sample_accs.items()}
-                        
-                        mix_remaining=[]
-                        mix_uid_remaining = [k for k in mix_sample_accs.keys() if self.config.data.under_performing_acc_lower < np.mean(mix_sample_accs[k]) < self.config.data.positive_synthesis_acc_upper]
-                        #mix_uid_remaining = [k for k in mix_sample_accs.keys() if 0.0 < np.mean(mix_sample_accs[k])<1.0]
-                        # print("threshold", self.config.data.under_performing_acc_lower, self.config.data.positive_synthesis_acc_upper)
-                        print('mix remaining', [f"{mix_sample_accs[k]}" for k in mix_sample_accs.keys()])
-                        
-                        for id, uid in enumerate(batch_mix.non_tensor_batch["uid"].tolist()):
-                            if uid in mix_uid_remaining:
-                                mix_remaining.append(id)
-                         
-                        if len(mix_remaining)%synthetic_sample!=0:
-                            mix_remaining=mix_remaining[:len(mix_remaining)-len(mix_remaining)%synthetic_sample]
-
-                        if len(mix_remaining)>len(ori_q2r_training_index_remaining)//2:
-                            mix_remaining=mix_remaining[:len(ori_q2r_training_index_remaining)//2-(len(ori_q2r_training_index_remaining))%synthetic_sample]
-
-                        print('<<<<<<<<<<<<<<<<<<<<mix_index_remaining>>>>>>>>>>>>>>>>>>>>>>>>>>', len(mix_remaining))
-                        batch_mix = batch_mix.select_idxs(mix_remaining)
+                            group_scores = defaultdict(list)
+                            for index, uid in enumerate(batch_cge.non_tensor_batch["uid"]):
+                                group_scores[uid].append(batch_cge.batch["acc"][index].item())
+                            accepted_uids = {
+                                uid
+                                for uid, scores in group_scores.items()
+                                if self.config.data.under_performing_acc_lower
+                                < np.mean(scores)
+                                < self.config.data.positive_synthesis_acc_upper
+                            }
+                            accepted_indices = [
+                                index
+                                for index, uid in enumerate(batch_cge.non_tensor_batch["uid"])
+                                if uid in accepted_uids
+                            ]
+                            batch_cge = batch_cge.select_idxs(accepted_indices)
+                            metrics["ttvs/rollouts/cge_total_generated"] = generated_count
+                            metrics["ttvs/clusters/cge_generated"] = len(plans)
+                            metrics["ttvs/clusters/cge_accepted"] = len(accepted_uids)
+                            metrics["ttvs/clusters/mean_variants"] = float(
+                                np.mean([len(plan.variants) for plan in plans])
+                            )
 
 
                     if self.global_steps>=MixInput_step:
@@ -1651,18 +1830,26 @@ class RayPPOTrainer:
                             r2q_remaining = random.sample(r2q_remaining, int(len(r2q_remaining) * self.config.data.r2q_training_ratio))
                             
                         r2q_batch_final = r2q_batch.select_idxs(r2q_remaining)
-                        
-                        if self.global_steps>=MixRollout_step and len(q2r_batch_final)>0:
-                            print('<<<<<<<<<<<<<', len(ans_final), len(r2q_batch_final), len(q2r_batch_final), len(batch_mix), '<<<<<<<<<<<<<')
-                            batch = DataProto.concat([ans_final, r2q_batch_final, q2r_batch_final, batch_mix])
-                            svs_metrics['SvS-Valid-Ratio/Num-MIX'] = len(batch_mix)
-                        else:
-                            print('<<<<<<<<<<<<<', len(ans_final), len(r2q_batch_final), len(q2r_batch_final), '<<<<<<<<<<<<<')
-                            batch = DataProto.concat([ans_final, r2q_batch_final, q2r_batch_final])
-                        print_svs_metrics = {k.replace('SvS-Valid-Ratio/', ''): v for k, v in svs_metrics.items()}
+
+                        # TTVS optimizes OQA and accepted IGE groups directly.
+                        # VPS generation is a TTVS query-construction stage and
+                        # is trained only when explicitly requested. Full-cluster
+                        # CGE groups join the policy batch after their own vote.
+                        training_parts = [ans_final, q2r_batch_final]
+                        if self.ttvs["train_synthesis_policy"]:
+                            training_parts.append(r2q_batch_final)
+                        if batch_cge is not None and len(batch_cge) > 0:
+                            training_parts.append(batch_cge)
+                        batch = DataProto.concat(training_parts)
+
                         svs_metrics['SvS-Valid-Ratio/Num-OQA'] = len(ans_final)
-                        svs_metrics['SvS-Valid-Ratio/Num-VPS'] = len(r2q_batch_final)
-                        svs_metrics['SvS-Valid-Ratio/Num-SPA'] = len(q2r_batch_final)
+                        svs_metrics['SvS-Valid-Ratio/Num-VPS'] = (
+                            len(r2q_batch_final) if self.ttvs["train_synthesis_policy"] else 0
+                        )
+                        svs_metrics['SvS-Valid-Ratio/Num-IGE'] = len(q2r_batch_final)
+                        svs_metrics['SvS-Valid-Ratio/Num-CGE'] = (
+                            len(batch_cge) if batch_cge is not None else 0
+                        )
                     
                         svs_metrics['SvS-Valid-Ratio/Num-Total'] = len(batch)
                         metrics.update(svs_metrics)
@@ -1792,18 +1979,15 @@ class RayPPOTrainer:
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
 
-                    if self.config.get("ttrl", {}).get("enable", False):
-                        from verl.trainer.ppo.ttrl_utils import apply_original_gt, compute_ttrl_metrics
-                        batch = apply_original_gt(batch)  #Replace the model-generated response with the original, high-quality "standard answer" that matches the prompt in the dataset.
+                    if ttvs_enabled:
+                        batch = restore_ttvs_original_gt(batch)
                         reward_tensor_original, reward_extra_infos_dict_original = compute_reward(batch, self.reward_fn)
                         batch.batch["token_level_scores_original"] = reward_tensor_original
-                        # Compute ttrl metrics
-                        if self.global_steps>=MixInput_step:
-                            ttrl_metrics = compute_ttrl_metrics(batch, synthetic_sample) #self.config.ttrl.n_samples_per_prompt #The reward for the response generated by the model itself (calculated in the previous step). The reward for the "standard answer" response (the reward_tensor_original just calculated). It calculates a series of contrasting metrics based on these two
-                        else:
-                            ttrl_metrics = compute_ttrl_metrics(batch, self.config.ttrl.n_samples_per_prompt)
-                        for key, value in ttrl_metrics.items():
-                                metrics.update({f"train/{key}": value})
+                        # TTVS evaluates OQA, IGE, and CGE by their explicit uid
+                        # groups, so metrics remain valid for configurable group
+                        # sizes and never infer an implicit N/4 contract.
+                        for key, value in compute_ttvs_metrics(batch).items():
+                            metrics[f"train/ttvs_{key}"] = value
 
                     # Log rollout generations if enabled
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)

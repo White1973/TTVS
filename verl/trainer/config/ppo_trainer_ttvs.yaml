@@ -1,0 +1,56 @@
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+# Test-Time Variational Synthesis (TTVS) paper-reproduction defaults.
+ttvs:
+  enable: true
+
+  # Original-query pseudo-labeling and IGE training rollouts.
+  label_vote_rollouts: 32
+  train_rollouts_per_query: 32
+
+  synthesis:
+    # Candidate variational queries generated from each accepted TTVS seed.
+    generation_candidates: 8
+    # Number of candidates retained in each semantic cluster for CGE.
+    num_variants_per_cluster: 3
+    # Independent IGE voting/training budget for each variational query.
+    ige_vote_rollouts_per_variant: 32
+    ige_train_rollouts_per_variant: 32
+    # The paper objective optimizes answers; synthesis-policy RL is optional.
+    train_synthesis_policy: false
+
+  cge:
+    enable: true
+    # Fixed total across the original query and all selected variants.
+    total_rollouts_per_cluster: 32
+    max_variants_per_cluster: 3
+
+data:
+  max_prompt_length: 1024
+  max_response_length: 3072
+  under_performing_acc_lower: 0.125
+  under_performing_acc_upper: 0.875
+  positive_synthesis_acc_lower: 0.125
+  positive_synthesis_acc_upper: 0.875
+  mixinput_step: 40
+  mixrollout_step: 60
+
+actor_rollout_ref:
+  actor:
+    optim:
+      lr: 5e-7
+  rollout:
+    n: ${ttvs.train_rollouts_per_query}
+    temperature: 0.6
+    val_kwargs:
+      do_sample: true
+      n: 16
+      temperature: 0.6
+      top_p: 0.95
+

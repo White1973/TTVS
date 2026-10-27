@@ -27,7 +27,7 @@ tensor_model_parallel_size=1 # rollout and training batch size
 use_tqdm=True # whether using tqdm in vLLM generation
 log_prob_micro_batch_size_per_gpu=2
 
-K=4 #3
+K=3
 MAX_PROMPT_LENGTH=1024
 MAX_RESPONSE_LENGTH=$((1024 * $K))
 if [ "$K" -gt 8 ]; then
@@ -36,7 +36,7 @@ else
   N=16
 fi
 
-EPISODE=40
+EPISODE=10
 DATA_TRAIN_BATCH_SIZE=8
 N_VOTES_PER_PROMPT=32
 N_SAMPLES_PER_PROMPT=32
@@ -47,7 +47,7 @@ DATA_LOCAL_DIR="data"
 BACKBONE_PATH="/personal/jiayu2026/models/${BACKBONE}"
 
 MODEL="${TASK}-${BACKBONE}"
-EXPERIMENT="TTRL-Len@${K}k"
+EXPERIMENT="TTVS-Len@${K}k"
 
 WANDB_PROJECT="jiayu-verl"
 LOG_NAME="TTVS-${DATE}-${EXPERIMENT}-${MODEL}-${ADVANTAGE}"
@@ -55,7 +55,7 @@ OUTPUT_DIR="/personal/jiayu2026/ckpts/${WANDB_PROJECT}/${MODEL}/${DATE}/${EXPERI
 
 # ------------------------------------------------------------
 python -m verl.trainer.main_ppo \
---config-name='ppo_trainer_ttrl.yaml'\
+--config-name='ppo_trainer_ttvs.yaml'\
   data.train_files=["$DATA_LOCAL_DIR/$TASK/train.parquet"] \
   data.val_files=["$DATA_LOCAL_DIR/$TASK/test.parquet"] \
   data.max_prompt_length=$MAX_PROMPT_LENGTH \
@@ -64,10 +64,10 @@ python -m verl.trainer.main_ppo \
   data.return_raw_chat=True \
   data.filter_overlong_prompts=True \
   data.truncation='error' \
-  data.mixinput_step=10 \
-  data.mixrollout_step=20 \
+  data.mixinput_step=40 \
+  data.mixrollout_step=60 \
   data.under_performing_acc_lower=0.125 \
-  data.under_performing_acc_upper=0.625 \
+  data.under_performing_acc_upper=0.875 \
   data.positive_synthesis_acc_lower=0.125 \
   data.positive_synthesis_acc_upper=0.875 \
   actor_rollout_ref.model.path=$BACKBONE_PATH \
@@ -79,7 +79,7 @@ python -m verl.trainer.main_ppo \
   actor_rollout_ref.actor.kl_loss_coef=${kl_loss_coef} \
   actor_rollout_ref.actor.kl_loss_type=low_var_kl \
   actor_rollout_ref.actor.entropy_coeff=0 \
-  actor_rollout_ref.actor.optim.lr=1e-6 \
+  actor_rollout_ref.actor.optim.lr=5e-7 \
   actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=0.03 \
   actor_rollout_ref.actor.optim.warmup_style='cosine' \
   actor_rollout_ref.actor.fsdp_config.param_offload=False \
@@ -94,9 +94,11 @@ python -m verl.trainer.main_ppo \
   actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=$((log_prob_micro_batch_size_per_gpu * 2)) \
   actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
   actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
-   actor_rollout_ref.rollout.n=$N_SAMPLES_PER_PROMPT \
+  actor_rollout_ref.rollout.n=$N_SAMPLES_PER_PROMPT \
+  actor_rollout_ref.rollout.temperature=0.6 \
   actor_rollout_ref.rollout.val_kwargs.do_sample=True \
   actor_rollout_ref.rollout.val_kwargs.n=$N \
+  actor_rollout_ref.rollout.val_kwargs.temperature=0.6 \
   actor_rollout_ref.rollout.val_kwargs.top_p=0.95 \
   actor_rollout_ref.rollout.max_model_len=$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH)) \
   actor_rollout_ref.rollout.max_num_batched_tokens=$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH)) \
@@ -111,13 +113,13 @@ python -m verl.trainer.main_ppo \
   algorithm.adv_estimator=$ADVANTAGE \
   custom_reward_function.path="./verl/utils/reward_score/ttrl_math/__init__.py" \
   custom_reward_function.name=reward_func \
-  ttrl.enable=True \
-  ttrl.n_votes_per_prompt=$N_VOTES_PER_PROMPT \
-  ttrl.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
+  ttvs.enable=True \
+  ttvs.label_vote_rollouts=$N_VOTES_PER_PROMPT \
+  ttvs.train_rollouts_per_query=$N_SAMPLES_PER_PROMPT \
   trainer.logger=['console','wandb'] \
   trainer.project_name=$WANDB_PROJECT \
   trainer.experiment_name=$LOG_NAME \
-  trainer.n_gpus_per_node=4 \
+  trainer.n_gpus_per_node=8 \
   trainer.nnodes=1 \
   trainer.save_freq=2000000 \
   trainer.test_freq=4 \

@@ -1,252 +1,366 @@
-<div align="center">
- 👋 Hi, everyone! 
-    verl is a RL training library initiated by <b>ByteDance Seed team</b> and maintained by the verl community.
-    <br>
-    <br>
-</div>
+# TTVS: Test-Time Variational Synthesis
 
-<div align="center">
+Research implementation of **TTVS: Boosting Self-Exploring Reinforcement Learning via Test-time Variational Synthesis**, published in Findings of ACL 2026.
 
-[<img src="https://devin.ai/assets/deepwiki-badge.png" alt="Ask DeepWiki.com" height="20"/>](https://deepwiki.com/volcengine/verl)
-[![GitHub Repo stars](https://img.shields.io/github/stars/volcengine/verl)](https://github.com/volcengine/verl/stargazers)
-[![Twitter](https://img.shields.io/twitter/follow/verl_project)](https://twitter.com/verl_project)
-<a href="https://join.slack.com/t/verlgroup/shared_invite/zt-2w5p9o4c3-yy0x2Q56s_VlGLsJ93A6vA"><img src="https://img.shields.io/badge/Slack-verl-blueviolet?logo=slack&amp"></a>
-<a href="https://arxiv.org/pdf/2409.19256"><img src="https://img.shields.io/static/v1?label=EuroSys&message=Paper&color=red"></a>
-[![Documentation](https://img.shields.io/badge/documentation-blue)](https://verl.readthedocs.io/en/latest/)
-<a href="https://raw.githubusercontent.com/eric-haibin-lin/verl-community/refs/heads/main/WeChat.JPG"><img src="https://img.shields.io/badge/微信-green?logo=wechat&amp"></a>
+TTVS adapts a large reasoning model directly on unlabeled test queries. It creates its own supervision through majority voting, synthesizes semantically equivalent query variants online, and combines query-level and cluster-level exploration during reinforcement learning.
 
-</div>
+- Paper: [2026.findings-acl.1634.pdf](2026.findings-acl.1634.pdf)
+- Framework: [verl](https://github.com/volcengine/verl)
+- Included tasks: MATH-500, AIME 2024, AMC 2023, and GPQA
+- Model families evaluated in the paper: Qwen3, Qwen2.5, and LLaMA
 
-![seed logo](https://github.com/user-attachments/assets/c42e675e-497c-4508-8bb9-093ad4d1f216)
+## Method
 
-<h1 style="text-align: center;">verl: Volcano Engine Reinforcement Learning for LLMs</h1>
+TTVS contains two stages.
 
-verl is a flexible, efficient and production-ready RL training library for large language models (LLMs).
+### 1. Online Variational Synthesis
 
-verl is the open-source version of **[HybridFlow: A Flexible and Efficient RLHF Framework](https://arxiv.org/abs/2409.19256v2)** paper.
+For each original unlabeled query `q`, TTVS:
 
-verl is flexible and easy to use with:
+1. samples multiple reasoning responses from the current policy;
+2. extracts their final answers and obtains a pseudo-label by majority vote;
+3. estimates query difficulty from agreement with that pseudo-label;
+4. retains queries whose agreement lies within `[tau_low, tau_high]`;
+5. synthesizes semantically equivalent query variants from correct reasoning trajectories;
+6. filters malformed or overlength variants online.
 
-- **Easy extension of diverse RL algorithms**: The hybrid-controller programming model enables flexible representation and efficient execution of complex post-training dataflows. Build RL dataflows such as GRPO, PPO in a few lines of code.
+This converts a static query into a semantic cluster:
 
-- **Seamless integration of existing LLM infra with modular APIs**: Decouples computation and data dependencies, enabling seamless integration with existing LLM frameworks, such as FSDP, Megatron-LM, vLLM, SGLang, etc
-
-- **Flexible device mapping**: Supports various placement of models onto different sets of GPUs for efficient resource utilization and scalability across different cluster sizes.
-
-- Ready integration with popular HuggingFace models
-
-verl is fast with:
-
-- **State-of-the-art throughput**: SOTA LLM training and inference engine integrations and SOTA RL throughput.
-
-- **Efficient actor model resharding with 3D-HybridEngine**: Eliminates memory redundancy and significantly reduces communication overhead during transitions between training and generation phases.
-
-</p>
-
-## News
-
-- [2025/06] verl with Megatron backend enables large MoE models such as [DeepSeek-671b and Qwen3-236b](https://verl.readthedocs.io/en/latest/perf/dpsk.html).
-- [2025/06] verl team will provide latest project updates at [PyTorch Day China](https://www.lfasiallc.com/pytorch-day-china/) on June 7th. Meet our dev team in Beijing!
-- [2025/05] [PF-PPO](https://arxiv.org/abs/2409.06957), accepted to ICML 2025, is now supported in verl! PF-PPO enhances policy learning efficiency and robustness by filtering potentially noisy reward signals and reusing high-quality experiences via a replay buffer.
-- [2025/04] [Seed-Thinking-v1.5](https://github.com/ByteDance-Seed/Seed-Thinking-v1.5/blob/main/seed-thinking-v1.5.pdf) tech report is released! Trained with verl, Seed-Thinking-v1.5 achieves 86.7 on AIME 2024, 55.0 on Codeforces and 77.3 on GPQA, demonstrating excellent reasoning abilities in STEM and coding. Beyond reasoning tasks, the method demonstrates notable generalization across diverse domains.
-- [2025/04] [VAPO](https://arxiv.org/pdf/2504.05118) (value-based augmented PPO) paper covers our latest RL method for reasoning models. Trained from Qwen-32B-base model, VAPO achieves 60.4 on AIME 2024, outperforming DAPO-32B.
-- [2025/03] [DAPO](https://dapo-sia.github.io/) is the open-sourced SOTA RL algorithm that achieves 50 points on AIME 2024 based on the Qwen2.5-32B pre-trained model, surpassing the previous SOTA achieved by DeepSeek's GRPO (DeepSeek-R1-Zero-Qwen-32B). DAPO's training is fully powered by verl and the reproduction code is available in `recipe/dapo` now.
-<details><summary> more... </summary>
-<ul>
-
-  <li>[2025/04] We will give a tutorial about latest post-training techniques and programming guide for verl at [ICLR 2025 Expo](https://iclr.cc/virtual/2025/calendar?filter_events=Expo+Talk+Panel&filter_rooms=), [SCI-FM workshop](https://open-foundation-model.github.io/) and [LMSys afterparty](https://lu.ma/d23nyynm). Talk materials available [here](https://github.com/eric-haibin-lin/verl-community/tree/main/iclr25). </li>
-  <li>[2025/03] verl v0.3.0.post1 is released! See [release note](https://github.com/volcengine/verl/releases/) for details. It achieves [~1.4x speedup](https://tongyx361.github.io/blogs/posts/verl-intro/#/verl-flexible-and-efficient-rl-for-llms) compared to prev versions.</li>
-  <li>[2025/05] verl will be presented at [A2M Shanghai](https://a2m.msup.com.cn/home/?aid=4488&city=shanghai) on 5/16 - 5/17.</li>
-  <li>[2025/05] verl will be presented at [GOSIM x PyTorch Day 2025](https://paris2025.gosim.org/). See you in Paris! </li>
-  <li>[2025/03] We introduced the programming model of verl at the [vLLM Beijing Meetup](https://mp.weixin.qq.com/s/n77GibL2corAtQHtVEAzfg) and [verl intro and updates](https://github.com/eric-haibin-lin/verl-community/blob/main/slides/verl-lmsys-meetup.pdf) at the [SGLang-LMSYS Org Meetup](https://lu.ma/ntjrr7ig) in Sunnyvale mid-March.</li>
-  <li>[2025/03] We will present verl(HybridFlow) at EuroSys 2025. See you in Rotterdam!</li>
-  <li>[2025/02] verl v0.2.0.post2 is released!</li>
-  <li>[2025/02] We presented verl in the <a href="https://lu.ma/ji7atxux">Bytedance/NVIDIA/Anyscale Ray Meetup</a>. See you in San Jose!</li>
-  <li>[2025/01] [Doubao-1.5-pro](https://team.doubao.com/zh/special/doubao_1_5_pro) is released with SOTA-level performance on LLM & VLM. The RL scaling preview model is trained using verl, reaching OpenAI O1-level performance on math benchmarks (70.0 pass@1 on AIME).</li>
-  <li>[2024/12] verl is presented at Ray Forward 2024. Slides available <a href="https://github.com/eric-haibin-lin/verl-community/blob/main/slides/Ray_Forward_2024_%E5%B7%AB%E9%94%A1%E6%96%8C.pdf">here</a></li>
-  <li>[2024/12] The team presented <a href="https://neurips.cc/Expo/Conferences/2024/workshop/100677">Post-training LLMs: From Algorithms to Infrastructure</a> at NeurIPS 2024. <a href="https://github.com/eric-haibin-lin/verl-data/tree/neurips">Slides</a> and <a href="https://neurips.cc/Expo/Conferences/2024/workshop/100677">video</a> available.</li>
-  <li>[2024/10] verl is presented at Ray Summit. <a href="https://www.youtube.com/watch?v=MrhMcXkXvJU&list=PLzTswPQNepXntmT8jr9WaNfqQ60QwW7-U&index=37">Youtube video</a> available.</li>
-  <li>[2024/08] HybridFlow (verl) is accepted to EuroSys 2025.</li>
-</ul>   
-</details>
-
-## Key Features
-
-- **FSDP**, **FSDP2** and **Megatron-LM** for training.
-- **vLLM**, **SGLang** and **HF Transformers** for rollout generation.
-- Compatible with Hugging Face Transformers and Modelscope Hub: [Qwen-3](https://github.com/volcengine/verl/blob/main/examples/grpo_trainer/run_qwen3-8b.sh), Qwen-2.5, Llama3.1, Gemma2, DeepSeek-LLM, etc
-- Supervised fine-tuning.
-- Reinforcement learning with [PPO](examples/ppo_trainer/), [GRPO](examples/grpo_trainer/), [ReMax](examples/remax_trainer/), [REINFORCE++](https://verl.readthedocs.io/en/latest/examples/config.html#algorithm), [RLOO](examples/rloo_trainer/), [PRIME](recipe/prime/), [DAPO](recipe/dapo/), [DrGRPO](recipe/drgrpo), [KL_Cov & Clip_Cov](recipe/entropy) etc.
-  - Support model-based reward and function-based reward (verifiable reward) for math, [coding](https://github.com/volcengine/verl/tree/main/recipe/dapo), etc
-  - Support vision-language models (VLMs) and [multi-modal RL](examples/grpo_trainer/run_qwen2_5_vl-7b.sh) with Qwen2.5-vl, Kimi-VL
-  - [Multi-turn with tool calling](https://github.com/volcengine/verl/tree/main/examples/sglang_multiturn)
-- LLM alignment recipes such as [Self-play preference optimization (SPPO)](https://github.com/volcengine/verl/tree/main/recipe/sppo)
-- Flash attention 2, [sequence packing](examples/ppo_trainer/run_qwen2-7b_seq_balance.sh), [sequence parallelism](examples/ppo_trainer/run_deepseek7b_llm_sp2.sh) support via DeepSpeed Ulysses, [LoRA](examples/sft/gsm8k/run_qwen_05_peft.sh), [Liger-kernel](examples/sft/gsm8k/run_qwen_05_sp2_liger.sh).
-- Scales up to 671B models and hundreds of GPUs with [expert parallelism](https://github.com/volcengine/verl/pull/1467)
-- Multi-gpu [LoRA RL](https://verl.readthedocs.io/en/latest/advance/ppo_lora.html) support to save memory.
-- Experiment tracking with wandb, swanlab, mlflow and tensorboard.
-
-## Upcoming Features and Changes
-
-- Roadmap https://github.com/volcengine/verl/issues/710
-- DeepSeek 671b optimizations with Megatron v0.11 https://github.com/volcengine/verl/issues/708
-- Multi-turn rollout and tools using optimizations https://github.com/volcengine/verl/issues/1882
-- Environment interactions https://github.com/volcengine/verl/issues/1172
-- List of breaking changes since v0.3 https://github.com/volcengine/verl/discussions/943, entropy_coeff defaults to 0
-- Lora for RL https://github.com/volcengine/verl/pull/1127 
-
-## Getting Started
-
-<a href="https://verl.readthedocs.io/en/latest/index.html"><b>Documentation</b></a>
-
-**Quickstart:**
-
-- [Installation](https://verl.readthedocs.io/en/latest/start/install.html)
-- [Quickstart](https://verl.readthedocs.io/en/latest/start/quickstart.html)
-- [Programming Guide](https://verl.readthedocs.io/en/latest/hybrid_flow.html) & [Tech Talk](https://hcqnc.xetlk.com/sl/3vACOK) (in Chinese)
-- [PPO in verl](https://verl.readthedocs.io/en/latest/algo/ppo.html)
-- [GRPO in verl](https://verl.readthedocs.io/en/latest/algo/grpo.html)
-
-**Running a PPO example step-by-step:**
-
-
-- [Prepare Data for Post-Training](https://verl.readthedocs.io/en/latest/preparation/prepare_data.html)
-- [Implement Reward Function for Dataset](https://verl.readthedocs.io/en/latest/preparation/reward_function.html)
-- [PPO Example Architecture](https://verl.readthedocs.io/en/latest/examples/ppo_code_architecture.html)
-- [Config Explanation](https://verl.readthedocs.io/en/latest/examples/config.html)
-
-**Reproducible algorithm baselines:**
-
-- [RL performance on coding, math](https://verl.readthedocs.io/en/latest/algo/baseline.html)
-
-**For code explanation and advance usage (extension):**
-
-- PPO Trainer and Workers
-  - [PPO Ray Trainer](https://verl.readthedocs.io/en/latest/workers/ray_trainer.html)
-  - [PyTorch FSDP Backend](https://verl.readthedocs.io/en/latest/workers/fsdp_workers.html)
-  - [Megatron-LM Backend](https://verl.readthedocs.io/en/latest/index.html)
-
-- Advanced Usage and Extension
-  - [Add Models with the FSDP Backend](https://verl.readthedocs.io/en/latest/advance/fsdp_extension.html)
-  - [Add Models with the Megatron-LM Backend](https://verl.readthedocs.io/en/latest/advance/megatron_extension.html)
-  - [Multi-turn Rollout Support](https://verl.readthedocs.io/en/latest/sglang_multiturn/multiturn.html)
-  - [Search Tool Integration](https://verl.readthedocs.io/en/latest/sglang_multiturn/search_tool_example.html)
-  - [Sandbox Fusion Integration](https://verl.readthedocs.io/en/latest/examples/sandbox_fusion_example.html)
-  - [Deployment using Separate GPU Resources](https://github.com/volcengine/verl/tree/main/examples/split_placement)
-  - [Extend to Other RL(HF) algorithms](https://verl.readthedocs.io/en/latest/advance/dpo_extension.html)
-  - [Ray API design tutorial](https://verl.readthedocs.io/en/latest/advance/placement.html)
-
-**Blogs from the community**
-
-- [When Reasoning Models Break Tokenization: The Hidden Complexity of Multiturn Training](https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/blob/main/rlhf/verl/multi-turn/fast_tokenization/multiturn_tokenization_and_masking.md)
-- [verl deployment on AWS SageMaker](https://medium.com/@kaige.yang0110/run-verl-on-sagemaker-using-4x8-l40s-gpus-8e6d5c3c61d3)
-- [verl x SGLang Multi-turn Code Walkthrough](https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/blob/main/rlhf/verl/multi-turn/code-walk-through/readme_EN.md)
-- [Optimizing SGLang Memory Usage in verl](https://hebiao064.github.io/rl-memory-management)
-- [SGLang, verl, OpenBMB and Tsinghua University: Pioneering End-to-End Multi-Turn RLHF](https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/blob/main/rlhf/verl/multi-turn/verl-multiturn-rollout-Release.md)
-- [Reinforcement Learning from Human Feedback on AMD GPUs with verl and ROCm Integration](https://rocm.blogs.amd.com/artificial-intelligence/verl-large-scale/README.html)
-- [veMLP x verl ：玩转强化学习训练](https://mp.weixin.qq.com/s/7nbqxk4knMGd-hQE9ls2tA)
-- [使用 verl 进行 GRPO 分布式强化学习训练最佳实践](https://www.volcengine.com/docs/6459/1463942)
-- [HybridFlow verl 原文浅析](https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/blob/main/rlhf/verl/readme.md)
-- [最高提升 20 倍吞吐量！豆包大模型团队发布全新 RLHF 框架，现已开源！](https://team.doubao.com/en/blog/%E6%9C%80%E9%AB%98%E6%8F%90%E5%8D%8720%E5%80%8D%E5%90%9E%E5%90%90%E9%87%8F-%E8%B1%86%E5%8C%85%E5%A4%A7%E6%A8%A1%E5%9E%8B%E5%9B%A2%E9%98%9F%E5%8F%91%E5%B8%83%E5%85%A8%E6%96%B0-rlhf-%E6%A1%86%E6%9E%B6-%E7%8E%B0%E5%B7%B2%E5%BC%80%E6%BA%90)
-
-## Performance Tuning Guide
-
-The performance is essential for on-policy RL algorithm. We have written a detailed [performance tuning guide](https://verl.readthedocs.io/en/latest/perf/perf_tuning.html) to help you optimize performance.
-
-## Upgrade to vLLM >= v0.8.2
-
-verl now supports vLLM>=0.8.2 when using FSDP as the training backend. Please refer to [this document](https://github.com/volcengine/verl/blob/main/docs/README_vllm0.8.md) for the installation guide and more information. Please avoid vllm 0.7.x, which contains bugs that may lead to OOMs and unexpected errors.
-
-## Use Latest SGLang
-
-SGLang is fully supported with verl, and SGLang RL Group is working extensively on building unique features, including multi-turn agentic RL, VLM RLHF, server-based RL, and partial rollout. Please refer to [this document](https://verl.readthedocs.io/en/latest/workers/sglang_worker.html) for the installation guide and more information.
-
-## Upgrade to FSDP2
-
-verl is fully embracing FSDP2! FSDP2 is recommended by torch distributed team, providing better throughput and memory usage, and is composible with other features (e.g. torch.compile). To enable FSDP2, simply use verl main and set the following options:
+```text
+original query q
+    ├── variant q'_1
+    ├── variant q'_2
+    └── variant q'_3
 ```
-actor_rollout_ref.ref.strategy=fsdp2
-actor_rollout_ref.actor.strategy=fsdp2
-critic.strategy=fsdp2 
-reward_model.strategy=fsdp2 
+
+The synthesis prompt is defined in [`prompts/variational_problem_synthesis_type1.txt`](prompts/variational_problem_synthesis_type1.txt).
+
+### 2. Test-Time Hybrid Exploration
+
+TTVS uses two complementary policy-update groups:
+
+- **Intra-Group Exploration (IGE):** performs majority voting and reward assignment independently for each original or synthesized query. It emphasizes accuracy on each individual formulation.
+- **Cross-Group Exploration (CGE):** distributes a fixed rollout budget across the original query and its selected variants, performs one majority vote over the mixed cluster, and assigns a shared consistency reward. It encourages invariance across equivalent formulations.
+
+```text
+Unlabeled query
+      │
+      ▼
+Pseudo-label and difficulty filtering
+      │
+      ▼
+Online variational synthesis ──► semantic query cluster
+      │                                  │
+      ├──────── IGE: per-query vote ─────┤
+      └──────── CGE: cluster vote ───────┘
+                                         │
+                                         ▼
+                                  GRPO policy update
 ```
-Furthermore, FSDP2 cpu offloading is compatible with gradient accumulation. You can turn it on to save memory with `actor_rollout_ref.actor.fsdp_config.offload_policy=True`. For more details, see https://github.com/volcengine/verl/pull/1026
 
-## AMD Support (ROCm Kernel)
+IGE and CGE use explicit group identities in the implementation: `query_id` identifies an IGE group, while `cluster_id` connects an original query to all of its variants for CGE.
 
-verl now supports FSDP as the training engine (Megatron support coming soon) and both integrates with vLLM and SGLang as inference engines. Please refer to [this document](https://github.com/volcengine/verl/blob/main/docs/amd_tutorial/amd_build_dockerfile_page.rst) for the installation guide and more information, and [this document](https://github.com/volcengine/verl/blob/main/docs/amd_tutorial/amd_vllm_page.rst) for the vLLM performance tuning for ROCm.
+## Paper Defaults
 
+The canonical configuration is [`verl/trainer/config/ppo_trainer_ttvs.yaml`](verl/trainer/config/ppo_trainer_ttvs.yaml).
 
-## Citation and acknowledgement
+| Setting | Default |
+|---|---:|
+| Optimizer | AdamW with cosine schedule |
+| Peak learning rate | `5e-7` |
+| Rollout temperature | `0.6` |
+| Original-query voting rollouts | `32` |
+| Original-query training rollouts | `32` |
+| Synthesized-query voting rollouts | `32` |
+| Synthesized-query training rollouts | `32` |
+| CGE total rollouts per cluster | `32` |
+| Candidate variants per accepted seed | `8` |
+| Variants retained for CGE | `3` |
+| Maximum prompt length | `1024` |
+| Maximum response length | `3072` |
+| Difficulty interval | `[0.125, 0.875]` |
+| IGE warm-up step | `40` |
+| CGE warm-up step | `60` |
+| Evaluation samples | `16` |
+| Evaluation temperature / top-p | `0.6 / 0.95` |
 
-If you find the project helpful, please cite:
+The paper uses 10 epochs for MATH-500 and GPQA, 20 for AMC 2023, and 40 for AIME 2024. The reported experiments use eight NVIDIA H800 80 GB GPUs.
 
-- [HybridFlow: A Flexible and Efficient RLHF Framework](https://arxiv.org/abs/2409.19256v2)
-- [A Framework for Training Large Language Models for Code Generation via Proximal Policy Optimization](https://i.cs.hku.hk/~cwu/papers/gmsheng-NL2Code24.pdf)
+The fixed CGE budget is shared across a complete semantic cluster rather than multiplied by its number of queries. For example, one original query plus three variants receives `8 + 8 + 8 + 8 = 32` rollouts.
 
-```bibtex
-@article{sheng2024hybridflow,
-  title   = {HybridFlow: A Flexible and Efficient RLHF Framework},
-  author  = {Guangming Sheng and Chi Zhang and Zilingfeng Ye and Xibin Wu and Wang Zhang and Ru Zhang and Yanghua Peng and Haibin Lin and Chuan Wu},
-  year    = {2024},
-  journal = {arXiv preprint arXiv: 2409.19256}
+## Implementation Map
+
+| Component | Location |
+|---|---|
+| TTVS training flow, synthesis, filtering, IGE and CGE | [`verl/trainer/ppo/ray_trainer.py`](verl/trainer/ppo/ray_trainer.py) |
+| Cluster planning, rollout allocation, voting and metrics | [`verl/trainer/ppo/ttvs_utils.py`](verl/trainer/ppo/ttvs_utils.py) |
+| Paper-aligned configuration | [`verl/trainer/config/ppo_trainer_ttvs.yaml`](verl/trainer/config/ppo_trainer_ttvs.yaml) |
+| Variational synthesis prompt | [`prompts/variational_problem_synthesis_type1.txt`](prompts/variational_problem_synthesis_type1.txt) |
+| Mathematical answer extraction and verification | [`verl/utils/reward_score/ttrl_math/`](verl/utils/reward_score/ttrl_math/) |
+| Dataset conversion | [`data/preprocess.py`](data/preprocess.py) |
+| Qwen3 experiment launchers | [`examples/ttrl/Qwen3/`](examples/ttrl/Qwen3/) |
+| Standalone launch scripts | [`scripts/`](scripts/) |
+| Focused CGE planning tests | [`tests/trainer/ppo/test_ttvs_utils.py`](tests/trainer/ppo/test_ttvs_utils.py) |
+
+The `examples/ttrl/` directory name is retained for compatibility with the original project layout. The maintained Qwen3 experiments use `ppo_trainer_ttvs.yaml` and the independent `ttvs.*` configuration namespace.
+
+## Installation
+
+### Requirements
+
+- Linux
+- Python 3.10 is recommended
+- CUDA-compatible NVIDIA GPUs
+- Eight GPUs for the paper-scale Qwen3 launchers; smaller runs can override `trainer.n_gpus_per_node`
+- A local Hugging Face model checkpoint
+
+Create and activate an environment, then install the repository:
+
+```bash
+conda create -n ttvs python=3.10 -y
+conda activate ttvs
+
+pip install -e ".[vllm,math]"
+```
+
+For the dependency versions used by the original environment, inspect [`scripts/install_ttrl_deps.sh`](scripts/install_ttrl_deps.sh). That installer includes CUDA- and Python-specific FlashAttention/FlashInfer wheels, so verify that its versions match the target machine before running it.
+
+Optional experiment logging uses Weights & Biases:
+
+```bash
+wandb login
+```
+
+## Data Preparation
+
+Raw JSON files are included under [`data/`](data/). Each source example follows this structure:
+
+```json
+{
+  "prompt": "problem text",
+  "answer": "reference answer"
 }
 ```
 
-verl is inspired by the design of Nemo-Aligner, Deepspeed-chat and OpenRLHF. The project is adopted and contributed by Bytedance, Anyscale, LMSys.org, [Alibaba Qwen team](https://github.com/QwenLM/), Shanghai AI Lab, Tsinghua University, UC Berkeley, UCLA, UIUC, University of Hong Kong, ke.com, [All Hands AI](https://www.all-hands.dev/), [ModelBest](http://modelbest.cn/), JD AI Lab, Microsoft Research, [StepFun](https://www.stepfun.com/), Amazon, LinkedIn, Meituan, [Camel-AI](https://www.camel-ai.org/), [OpenManus](https://github.com/OpenManus), Xiaomi, NVIDIA research, [Baichuan](https://www.baichuan-ai.com/home), [RedNote](https://www.xiaohongshu.com/), [SwissAI](https://www.swiss-ai.org/), [Moonshot AI (Kimi)](https://www.moonshot-ai.com/), Baidu, Snowflake, Skywork.ai, JetBrains, [IceSword Lab](https://www.iceswordlab.com), and many more.
+The reference answer is retained only for evaluation and diagnostic metrics. TTVS constructs the reward used for policy optimization from the model's own majority-vote pseudo-label.
 
-## Awesome work using verl
+The trainer expects Parquet files containing:
 
-- [TinyZero](https://github.com/Jiayi-Pan/TinyZero): a reproduction of **DeepSeek R1 Zero** recipe for reasoning tasks ![GitHub Repo stars](https://img.shields.io/github/stars/Jiayi-Pan/TinyZero)
-- [SkyThought](https://github.com/NovaSky-AI/SkyThought): RL training for Sky-T1-7B by NovaSky AI team. ![GitHub Repo stars](https://img.shields.io/github/stars/NovaSky-AI/SkyThought)
-- [simpleRL-reason](https://github.com/hkust-nlp/simpleRL-reason): SimpleRL-Zoo: Investigating and Taming Zero Reinforcement Learning for Open Base Models in the Wild ![GitHub Repo stars](https://img.shields.io/github/stars/hkust-nlp/simpleRL-reason)
-- [Easy-R1](https://github.com/hiyouga/EasyR1): **Multi-modal** RL training framework ![GitHub Repo stars](https://img.shields.io/github/stars/hiyouga/EasyR1)
-- [OpenManus-RL](https://github.com/OpenManus/OpenManus-RL): LLM Agents RL tunning framework for multiple agent environments. ![GitHub Repo stars](https://img.shields.io/github/stars/OpenManus/OpenManus-RL)
-- [rllm](https://github.com/agentica-project/rllm): async RL training with [verl-pipeline](https://github.com/agentica-project/verl-pipeline) ![GitHub Repo stars](https://img.shields.io/github/stars/agentica-project/rllm)
-- [RAGEN](https://github.com/ZihanWang314/ragen): a general-purpose reasoning **agent** training framework ![GitHub Repo stars](https://img.shields.io/github/stars/ZihanWang314/ragen)
-- [Search-R1](https://github.com/PeterGriffinJin/Search-R1): RL with reasoning and **searching (tool-call)** interleaved LLMs ![GitHub Repo stars](https://img.shields.io/github/stars/PeterGriffinJin/Search-R1)
-- [ReSearch](https://github.com/Agent-RL/ReSearch): Learning to **Re**ason with **Search** for LLMs via Reinforcement Learning ![GitHub Repo stars](https://img.shields.io/github/stars/Agent-RL/ReSearch)
-- [Skywork-OR1](https://github.com/SkyworkAI/Skywork-OR1): Skywork open reaonser series ![GitHub Repo stars](https://img.shields.io/github/stars/SkyworkAI/Skywork-OR1)
-- [ToRL](https://github.com/GAIR-NLP/ToRL): Scaling tool-integrated RL ![GitHub Repo stars](https://img.shields.io/github/stars/GAIR-NLP/ToRL)
-- [Absolute Zero Reasoner](https://github.com/LeapLabTHU/Absolute-Zero-Reasoner): [A no human curated data self-play framework for reasoning](https://arxiv.org/abs/2505.03335) ![GitHub Repo stars](https://img.shields.io/github/stars/LeapLabTHU/Absolute-Zero-Reasoner)
-- [verl-agent](https://github.com/langfengQ/verl-agent): A scalable training framework for **long-horizon LLM/VLM agents**, along with a new algorithm **GiGPO** ![GitHub Repo stars](https://img.shields.io/github/stars/langfengQ/verl-agent)
-- [RL-Factory](https://github.com/Simple-Efficient/RL-Factory): An easy and efficient RL post-training framework for Agentic Learning ![GitHub Repo stars](https://img.shields.io/github/stars/Simple-Efficient/RL-Factory)
-- [ReTool](https://retool-rl.github.io/): ReTool: reinforcement learning for strategic tool use in LLMs. Code release is in progress...
-- [verl-tool](https://github.com/TIGER-AI-Lab/verl-tool): An unified and easy-to-extend tool-agent training framework based on verl![GitHub Repo stars](https://img.shields.io/github/stars/TIGER-AI-Lab/verl-tool)
-- [PRIME](https://github.com/PRIME-RL/PRIME): Process reinforcement through implicit rewards ![GitHub Repo stars](https://img.shields.io/github/stars/PRIME-RL/PRIME)
-- [GUI-R1](https://github.com/ritzz-ai/GUI-R1): **GUI-R1**: A Generalist R1-style Vision-Language Action Model For **GUI Agents** ![GitHub Repo stars](https://img.shields.io/github/stars/ritzz-ai/GUI-R1)
-- [DeepRetrieval](https://github.com/pat-jj/DeepRetrieval): RL Training of **Search Agent** with **Search/Retrieval Outcome** ![GitHub Repo stars](https://img.shields.io/github/stars/pat-jj/DeepRetrieval)
-- [Code-R1](https://github.com/ganler/code-r1): Reproducing R1 for **Code** with Reliable Rewards ![GitHub Repo stars](https://img.shields.io/github/stars/ganler/code-r1)
-- [DeepResearcher](https://github.com/GAIR-NLP/DeepResearcher): Scaling deep research via reinforcement learning in real-world environments ![GitHub Repo stars](https://img.shields.io/github/stars/GAIR-NLP/DeepResearcher)
-- [VAGEN](https://github.com/RAGEN-AI/VAGEN): Training VLM agents with multi-turn reinforcement learning ![GitHub Repo stars](https://img.shields.io/github/stars/RAGEN-AI/VAGEN)
-- [RM-R1](https://arxiv.org/abs/2505.02387): RL training of reasoning reward models ![GitHub Repo stars](https://img.shields.io/github/stars/RM-R1-UIUC/RM-R1)
-- [LUFFY](https://arxiv.org/pdf/2504.14945): Learning to Reason under Off-Policy Guidance![GitHub Repo stars](https://img.shields.io/github/stars/ElliottYan/LUFFY)
-- [DeepMath](https://github.com/zwhe99/DeepMath): DeepMath-103K data and series models for math reasoning![GitHub Repo stars](https://img.shields.io/github/stars/zwhe99/DeepMath)
-- [Entropy Mechanism of RL](https://github.com/PRIME-RL/Entropy-Mechanism-of-RL): The Entropy Mechanism of Reinforcement Learning for Large Language Model Reasoning![GitHub Repo stars](https://img.shields.io/github/stars/PRIME-RL/Entropy-Mechanism-of-RL)
-- [LLaSA-TTS-GRPO](https://github.com/channel-io/ch-tts-llasa-rl-grpo): TTS fine-tuning with GRPO optimization based on LLASA models ![GitHub Repo stars](https://img.shields.io/github/stars/channel-io/ch-tts-llasa-rl-grpo)
-- [PF-PPO](https://arxiv.org/abs/2409.06957): Policy Filtration for PPO based on the reliability of reward signals for more efficient and robust RLHF.
-- [RACRO](https://github.com/gyhdog99/RACRO2): Build multi-modal reasoning models via decoupling it into query-conditioned captioning and text-only reasoning ![GitHub Repo stars](https://img.shields.io/github/stars/gyhdog99/RACRO2)
+- `data_source`
+- chat-formatted `prompt`
+- `reward_model.ground_truth`
+- `extra_info.index`
 
-and many more awesome work listed in [recipe](recipe/README.md).
+Convert a benchmark by selecting its directory in `data/preprocess.py`, then running the converter from `data/`:
 
-## Contribution Guide
+```bash
+cd data
 
-See [contributions guide](CONTRIBUTING.md)
+# Set data_source in preprocess.py to one of:
+# MATH-TTT, AIME-TTT, AMC-TTT, or GPQA-TTT
+python preprocess.py
 
-## About [ByteDance Seed Team](https://team.doubao.com/)
+cd ..
+```
 
-Founded in 2023, ByteDance Seed Team is dedicated to crafting the industry's most advanced AI foundation models. The team aspires to become a world-class research team and make significant contributions to the advancement of science and society. You can get to know Bytedance Seed better through the following channels👇
-<div>
-  <a href="https://team.doubao.com/">
-    <img src="https://img.shields.io/badge/Website-%231e37ff?style=for-the-badge&logo=bytedance&logoColor=white"></a>
-  <a href="https://github.com/user-attachments/assets/469535a8-42f2-4797-acdf-4f7a1d4a0c3e">
-    <img src="https://img.shields.io/badge/WeChat-07C160?style=for-the-badge&logo=wechat&logoColor=white"></a>
- <a href="https://www.xiaohongshu.com/user/profile/668e7e15000000000303157d?xsec_token=ABl2-aqekpytY6A8TuxjrwnZskU-6BsMRE_ufQQaSAvjc%3D&xsec_source=pc_search">
-    <img src="https://img.shields.io/badge/Xiaohongshu-%23FF2442?style=for-the-badge&logo=xiaohongshu&logoColor=white"></a>
-  <a href="https://www.zhihu.com/org/dou-bao-da-mo-xing-tuan-dui/">
-    <img src="https://img.shields.io/badge/zhihu-%230084FF?style=for-the-badge&logo=zhihu&logoColor=white"></a>
+The resulting files must be available as:
 
-</div>
----
+```text
+data/<TASK>/train.parquet
+data/<TASK>/test.parquet
+```
 
-We are HIRING! Send us an [email](mailto:haibin.lin@bytedance.com) if you are interested in internship/FTE opportunities in RL for agents.
+## Quick Start
+
+The standalone launcher initializes a local Ray head and starts the paper-aligned Qwen3-4B MATH experiment:
+
+```bash
+TTVS_LOAD_MODULES=0 \
+TTVS_CONDA_ENV=ttvs \
+./scripts/train_qwen3.sh \
+  actor_rollout_ref.model.path=/path/to/Qwen3-4B \
+  critic.model.path=/path/to/Qwen3-4B \
+  trainer.default_local_dir=/path/to/checkpoints/ttvs-math
+```
+
+The final Hydra arguments override values declared earlier in the benchmark launcher. This is the recommended way to replace machine-specific model and checkpoint paths.
+
+The wrapper accepts these environment variables:
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `TTVS_CONDA_ENV` | Conda environment activated by the wrapper | `ttrl` |
+| `TTVS_LOAD_MODULES` | Load the cluster Anaconda module when `1` | `1` |
+| `TTVS_ANACONDA_MODULE` | Environment-module name | `Anaconda3/2023.09-0` |
+| `RAY_TMPDIR` | Ray temporary directory | `<repo>/.ray_tmp` |
+
+On a machine without environment modules, use `TTVS_LOAD_MODULES=0`. The wrapper stops an existing local Ray runtime before creating a new head node.
+
+### Benchmark Launchers
+
+Run a benchmark launcher directly when Ray and the environment are already initialized:
+
+```bash
+# MATH-500, 10 epochs
+bash examples/ttrl/Qwen3/math.sh \
+  actor_rollout_ref.model.path=/path/to/Qwen3-4B \
+  critic.model.path=/path/to/Qwen3-4B
+
+# AIME 2024, 40 epochs
+bash examples/ttrl/Qwen3/aime.sh \
+  actor_rollout_ref.model.path=/path/to/Qwen3-4B \
+  critic.model.path=/path/to/Qwen3-4B
+
+# AMC 2023, 20 epochs
+bash examples/ttrl/Qwen3/amc.sh \
+  actor_rollout_ref.model.path=/path/to/Qwen3-4B \
+  critic.model.path=/path/to/Qwen3-4B
+
+# GPQA, 10 epochs
+bash examples/ttrl/Qwen3/gpqa.sh \
+  actor_rollout_ref.model.path=/path/to/Qwen3-4B \
+  critic.model.path=/path/to/Qwen3-4B
+```
+
+For Qwen3-8B on MATH-500, use:
+
+```bash
+bash examples/ttrl/Qwen3/math_8B.sh \
+  actor_rollout_ref.model.path=/path/to/Qwen3-8B \
+  critic.model.path=/path/to/Qwen3-8B
+```
+
+Compatibility launchers for Qwen2.5 and LLaMA are retained under `examples/ttrl/`. The Qwen3 launchers are the canonical path for the current `ttvs.*` implementation.
+
+## Configuration
+
+Important TTVS fields can be overridden from the command line:
+
+```bash
+bash examples/ttrl/Qwen3/math.sh \
+  ttvs.label_vote_rollouts=32 \
+  ttvs.train_rollouts_per_query=32 \
+  ttvs.synthesis.generation_candidates=8 \
+  ttvs.synthesis.num_variants_per_cluster=3 \
+  ttvs.synthesis.ige_vote_rollouts_per_variant=32 \
+  ttvs.synthesis.ige_train_rollouts_per_variant=32 \
+  ttvs.cge.total_rollouts_per_cluster=32 \
+  ttvs.cge.max_variants_per_cluster=3 \
+  data.mixinput_step=40 \
+  data.mixrollout_step=60
+```
+
+| Key | Description |
+|---|---|
+| `ttvs.label_vote_rollouts` | Responses used to estimate the original-query pseudo-label |
+| `ttvs.train_rollouts_per_query` | Original-query rollouts retained for policy learning |
+| `ttvs.synthesis.generation_candidates` | Query variants generated from an accepted seed |
+| `ttvs.synthesis.num_variants_per_cluster` | Maximum selected variants associated with a semantic cluster |
+| `ttvs.synthesis.ige_vote_rollouts_per_variant` | Responses used for each variant's independent IGE vote |
+| `ttvs.synthesis.ige_train_rollouts_per_variant` | Variant responses retained for IGE learning |
+| `ttvs.synthesis.train_synthesis_policy` | Whether query-generation trajectories are optimized; disabled by default |
+| `ttvs.cge.enable` | Enables cross-group exploration |
+| `ttvs.cge.total_rollouts_per_cluster` | Fixed response budget shared by a full cluster |
+| `ttvs.cge.max_variants_per_cluster` | Maximum number of variants included in CGE |
+| `data.mixinput_step` | Step at which online variants and IGE enter training |
+| `data.mixrollout_step` | Step at which CGE begins |
+
+`actor_rollout_ref.rollout.n` must equal `ttvs.train_rollouts_per_query`. Training rollout counts cannot exceed their corresponding voting counts.
+
+## Monitoring
+
+In addition to standard verl/GRPO metrics, the implementation records:
+
+- `SvS-Valid-Ratio/Num-OQA`: accepted original-query rollouts;
+- `SvS-Valid-Ratio/Num-IGE`: accepted synthesized-query IGE rollouts;
+- `SvS-Valid-Ratio/Num-CGE`: accepted full-cluster CGE rollouts;
+- `ttvs/rollouts/cge_total_generated`: total CGE responses generated in the step;
+- `ttvs/clusters/cge_generated`: semantic clusters considered for CGE;
+- `ttvs/clusters/cge_accepted`: clusters retained after online filtering;
+- `ttvs/clusters/mean_variants`: mean number of selected variants per CGE cluster;
+- `train/ttvs_label_accuracy`, `train/ttvs_reward_accuracy`, and related pseudo-label diagnostics.
+
+To save extracted synthetic questions, provide:
+
+```bash
+trainer.synthetic_data_dir=/path/to/synthetic_questions
+```
+
+## Reproducing the Paper Setting
+
+For the closest reproduction:
+
+1. use the provided benchmark test queries as the unlabeled training stream;
+2. use the Qwen3 launchers and `ppo_trainer_ttvs.yaml`;
+3. keep 32 training/voting rollouts and 16 evaluation samples;
+4. keep `tau_low=0.125`, `tau_high=0.875`, `Lmax=1024`;
+5. enable IGE at step 40 and CGE at step 60;
+6. use the paper's task-specific epoch count;
+7. use eight GPUs and record both test-time training and final evaluation seeds.
+
+The paper reports the following representative results for the Qwen3 family:
+
+| Model | Method | MATH-500 | AIME 2024 | AMC 2023 | GPQA | Average |
+|---|---|---:|---:|---:|---:|---:|
+| Qwen3-1.7B-Instruct | Initial | 59.4 | 3.3 | 28.9 | 13.1 | 26.2 |
+| Qwen3-1.7B-Instruct | TTRL | 73.4 | 15.2 | 54.2 | 22.2 | 41.3 |
+| Qwen3-1.7B-Instruct | TTVS | **80.2** | **23.3** | **61.4** | **26.3** | **47.5** |
+| Qwen3-4B | Initial | 64.0 | 10.0 | 26.5 | 26.3 | 31.7 |
+| Qwen3-4B | TTRL | 85.0 | 26.7 | 61.4 | 43.0 | 54.0 |
+| Qwen3-4B | TTVS | **90.3** | **36.7** | **71.1** | **48.9** | **61.5** |
+| Qwen3-8B | Initial | 82.2 | 26.9 | 57.8 | 48.0 | 53.7 |
+| Qwen3-8B | TTRL | 89.2 | 46.7 | 68.6 | 53.0 | 65.4 |
+| Qwen3-8B | TTVS | **92.6** | **50.0** | **72.3** | **56.1** | **67.8** |
+
+Refer to the paper for results on Qwen2.5, LLaMA, additional datasets, ablations, computational cost, and Avg@16/Maj@16 evaluation.
+
+## Testing
+
+Run the focused TTVS planning tests with:
+
+```bash
+pytest -q tests/trainer/ppo/test_ttvs_utils.py
+```
+
+Run lightweight syntax checks with:
+
+```bash
+python -m py_compile \
+  verl/trainer/ppo/ray_trainer.py \
+  verl/trainer/ppo/ttvs_utils.py
+
+bash -n scripts/train.sh scripts/train16.sh scripts/train_qwen3.sh
+```
+
+## Scope and Limitations
+
+- The current reward implementation targets tasks with extractable, verifiable final answers.
+- The paper's experiments are language-only; multimodal TTVS is not evaluated.
+- Query synthesis quality depends on the policy's existing instruction-following and rewriting ability. The paper uses an expert-data warm-up for weaker base models.
+- The included launchers contain historical machine-specific defaults. Override model and output paths from the command line.
+- Full paper-scale reproduction is compute intensive: online voting, variant synthesis, IGE, and CGE all invoke rollout generation.
+- Extending TTVS to subjective tasks requires a reliable model-based judge or reward model and is outside the current rule-based setup.
+
+## Citation
+
+If you use TTVS, please cite:
+
+```bibtex
+@inproceedings{bai-etal-2026-ttvs,
+  title     = {{TTVS}: Boosting Self-Exploring Reinforcement Learning via Test-time Variational Synthesis},
+  author    = {Bai, Sikai and Li, Haoxi and Zhang, Jie and Liu, Yongjiang and Guo, Song},
+  booktitle = {Findings of the Association for Computational Linguistics: ACL 2026},
+  year      = {2026},
+  month     = {July},
+  pages     = {32651--32665},
+  publisher = {Association for Computational Linguistics}
+}
+```
+
+## Acknowledgements
+
+This repository is built on [verl](https://github.com/volcengine/verl), whose distributed training, rollout, and worker infrastructure make the TTVS implementation possible.
+
+## License
+
+The code is released under the [Apache License 2.0](LICENSE).
