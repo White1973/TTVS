@@ -11,19 +11,6 @@ TTVS_CONDA_ENV=ttvs \
   trainer.default_local_dir=/path/to/checkpoints/ttvs-math
 ```
 
-The final Hydra arguments override values declared earlier in the benchmark launcher. This is the recommended way to replace machine-specific model and checkpoint paths.
-
-The wrapper accepts these environment variables:
-
-| Variable | Meaning | Default |
-|---|---|---|
-| `TTVS_CONDA_ENV` | Conda environment activated by the wrapper | `ttrl` |
-| `TTVS_LOAD_MODULES` | Load the cluster Anaconda module when `1` | `1` |
-| `TTVS_ANACONDA_MODULE` | Environment-module name | `Anaconda3/2023.09-0` |
-| `RAY_TMPDIR` | Ray temporary directory | `<repo>/.ray_tmp` |
-
-On a machine without environment modules, use `TTVS_LOAD_MODULES=0`. The wrapper stops an existing local Ray runtime before creating a new head node.
-
 ## Benchmark Launchers
 
 Run a benchmark launcher directly when Ray and the environment are already initialized:
