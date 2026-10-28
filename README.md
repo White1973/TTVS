@@ -100,13 +100,10 @@ The trainer expects Parquet files containing:
 Convert a benchmark by selecting its directory in `data/preprocess.py`, then running the converter from `data/`:
 
 ```bash
-cd data
-
 # Set data_source in preprocess.py to one of:
 # MATH-TTT, AIME-TTT, AMC-TTT, or GPQA-TTT
 python preprocess.py
 
-cd ..
 ```
 
 The resulting files must be available as:
