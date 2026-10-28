@@ -1,4 +1,4 @@
-# Quick Start
+# Training Configuration
 
 The standalone launcher initializes a local Ray head and starts the paper-aligned Qwen3-4B MATH experiment:
 
