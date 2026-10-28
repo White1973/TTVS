@@ -4,7 +4,7 @@ Research implementation of **TTVS: Boosting Self-Exploring Reinforcement Learnin
 
 TTVS adapts a large reasoning model directly on unlabeled test queries. It creates its own supervision through majority voting, synthesizes semantically equivalent query variants online, and combines query-level and cluster-level exploration during reinforcement learning.
 
-- Paper: [2026.findings-acl.1634.pdf](2026.findings-acl.1634.pdf)
+- Paper: [TTVS.pdf](https://aclanthology.org/2026.findings-acl.1634/)
 - Framework: [verl](https://github.com/volcengine/verl)
 - Included tasks: MATH-500, AIME 2024, AMC 2023, and GPQA
 - Model families evaluated in the paper: Qwen3, Qwen2.5, and LLaMA
@@ -33,8 +33,6 @@ original query q
     └── variant q'_3
 ```
 
-The synthesis prompt is defined in [`prompts/variational_problem_synthesis_type1.txt`](prompts/variational_problem_synthesis_type1.txt).
-
 ### 2. Test-Time Hybrid Exploration
 
 TTVS uses two complementary policy-update groups:
@@ -60,50 +58,6 @@ Online variational synthesis ──► semantic query cluster
 
 IGE and CGE use explicit group identities in the implementation: `query_id` identifies an IGE group, while `cluster_id` connects an original query to all of its variants for CGE.
 
-## Paper Defaults
-
-The canonical configuration is [`verl/trainer/config/ppo_trainer_ttvs.yaml`](verl/trainer/config/ppo_trainer_ttvs.yaml).
-
-| Setting | Default |
-|---|---:|
-| Optimizer | AdamW with cosine schedule |
-| Peak learning rate | `5e-7` |
-| Rollout temperature | `0.6` |
-| Original-query voting rollouts | `32` |
-| Original-query training rollouts | `32` |
-| Synthesized-query voting rollouts | `32` |
-| Synthesized-query training rollouts | `32` |
-| CGE total rollouts per cluster | `32` |
-| Candidate variants per accepted seed | `8` |
-| Variants retained for CGE | `3` |
-| Maximum prompt length | `1024` |
-| Maximum response length | `3072` |
-| Difficulty interval | `[0.125, 0.875]` |
-| IGE warm-up step | `40` |
-| CGE warm-up step | `60` |
-| Evaluation samples | `16` |
-| Evaluation temperature / top-p | `0.6 / 0.95` |
-
-The paper uses 10 epochs for MATH-500 and GPQA, 20 for AMC 2023, and 40 for AIME 2024. The reported experiments use eight NVIDIA H800 80 GB GPUs.
-
-The fixed CGE budget is shared across a complete semantic cluster rather than multiplied by its number of queries. For example, one original query plus three variants receives `8 + 8 + 8 + 8 = 32` rollouts.
-
-## Implementation Map
-
-| Component | Location |
-|---|---|
-| TTVS training flow, synthesis, filtering, IGE and CGE | [`verl/trainer/ppo/ray_trainer.py`](verl/trainer/ppo/ray_trainer.py) |
-| Cluster planning, rollout allocation, voting and metrics | [`verl/trainer/ppo/ttvs_utils.py`](verl/trainer/ppo/ttvs_utils.py) |
-| Paper-aligned configuration | [`verl/trainer/config/ppo_trainer_ttvs.yaml`](verl/trainer/config/ppo_trainer_ttvs.yaml) |
-| Variational synthesis prompt | [`prompts/variational_problem_synthesis_type1.txt`](prompts/variational_problem_synthesis_type1.txt) |
-| Mathematical answer extraction and verification | [`verl/utils/reward_score/ttrl_math/`](verl/utils/reward_score/ttrl_math/) |
-| Dataset conversion | [`data/preprocess.py`](data/preprocess.py) |
-| Qwen3 experiment launchers | [`examples/ttrl/Qwen3/`](examples/ttrl/Qwen3/) |
-| Standalone launch scripts | [`scripts/`](scripts/) |
-| Focused CGE planning tests | [`tests/trainer/ppo/test_ttvs_utils.py`](tests/trainer/ppo/test_ttvs_utils.py) |
-
-The `examples/ttrl/` directory name is retained for compatibility with the original project layout. The maintained Qwen3 experiments use `ppo_trainer_ttvs.yaml` and the independent `ttvs.*` configuration namespace.
-
 ## Installation
 
 ### Requirements
@@ -121,14 +75,6 @@ conda create -n ttvs python=3.10 -y
 conda activate ttvs
 
 pip install -e ".[vllm,math]"
-```
-
-For the dependency versions used by the original environment, inspect [`scripts/install_ttrl_deps.sh`](scripts/install_ttrl_deps.sh). That installer includes CUDA- and Python-specific FlashAttention/FlashInfer wheels, so verify that its versions match the target machine before running it.
-
-Optional experiment logging uses Weights & Biases:
-
-```bash
-wandb login
 ```
 
 ## Data Preparation
