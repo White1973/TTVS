@@ -123,4 +123,5 @@ ENV/
 logs
 log
 outputs
+slurm*.out
 .history

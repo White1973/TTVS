@@ -19,3 +19,6 @@ torchdata
 einops
 qwen_vl_utils
 torchvision==0.20.1
+latex2sympy2_extended
+math_verify
+sympy

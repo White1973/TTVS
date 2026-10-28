@@ -2,9 +2,9 @@
 ![TTVS](TTVS.png)
 Official implementation of **TTVS: Boosting Self-Exploring Reinforcement Learning via Test-time Variational Synthesis**, published in Findings of ACL 2026.
 
-TTVS adapts a large reasoning model directly on unlabeled test queries. It creates its own supervision through majority voting, synthesizes semantically equivalent query variants online, and combines query-level and cluster-level exploration during reinforcement learning.
+TTVS adapts a large reasoning model directly on unlabeled test queries. It creates its own supervision through majority voting, synthesizes candidate query variants intended to preserve the original semantics, and combines query-level and cluster-level exploration during reinforcement learning.
 
-- Paper: [TTVS.pdf](https://aclanthology.org/2026.findings-acl.1634/)
+- Paper: [ACL Anthology](https://aclanthology.org/2026.findings-acl.1634/)
 - Framework: [verl](https://github.com/volcengine/verl)
 - Included tasks: MATH-500, AIME 2024, AMC 2023, and GPQA
 - Model families evaluated in the paper: Qwen3, Qwen2.5, and LLaMA
@@ -21,7 +21,7 @@ For each original unlabeled query `q`, TTVS:
 2. extracts their final answers and obtains a pseudo-label by majority vote;
 3. estimates query difficulty from agreement with that pseudo-label;
 4. retains queries whose agreement lies within `[tau_low, tau_high]`;
-5. synthesizes semantically equivalent query variants from correct reasoning trajectories;
+5. synthesizes candidate query variants intended to be semantically equivalent from correct reasoning trajectories;
 6. filters malformed or overlength variants online.
 
 This converts a static query into a semantic cluster:
@@ -63,10 +63,11 @@ IGE and CGE use explicit group identities in the implementation: `query_id` iden
 ### Requirements
 
 - Linux
-- Python 3.10 is recommended
+- Python 3.10 or newer
 - CUDA-compatible NVIDIA GPUs
-- Eight GPUs for the paper-scale Qwen3 launchers; smaller runs can override `trainer.n_gpus_per_node`
+- Eight GPUs for the paper-scale Qwen3 launchers; smaller runs also require corresponding batch, rollout, token-length, and memory adjustments
 - A local Hugging Face model checkpoint
+- `bc` for the Qwen3 MATH launcher
 
 Create and activate an environment, then install the repository:
 
@@ -97,14 +98,26 @@ The trainer expects Parquet files containing:
 - `reward_model.ground_truth`
 - `extra_info.index`
 
-Convert a benchmark by selecting its directory in `data/preprocess.py`, then running the converter from `data/`:
+Convert a benchmark from the repository root. The converter resolves paths relative to `data/` and writes `train.parquet` and `test.parquet` into the selected benchmark directory:
 
 ```bash
-# Set data_source in preprocess.py to one of:
-# MATH-TTT, AIME-TTT, AMC-TTT, or GPQA-TTT
-python preprocess.py
+# MATH-500 uses train_init.json as its unlabeled test-time training stream.
+python data/preprocess.py --data-source MATH-TTT
 
+python data/preprocess.py --data-source AIME-TTT
+python data/preprocess.py --data-source AMC-TTT
+python data/preprocess.py --data-source GPQA-TTT
 ```
+
+Use `--train-file` or `--test-file` to select a different JSON file. For example:
+
+```bash
+python data/preprocess.py \
+  --data-source MATH-TTT \
+  --train-file train_mix_new.json
+```
+
+For MATH-500, `train_init.json` is identical to `test.json`: the same test queries form the unlabeled adaptation stream. Answers remain in the files for evaluation and diagnostics, but TTVS does not use them as the policy-optimization reward target.
 
 The resulting files must be available as:
 
@@ -116,15 +129,19 @@ data/<TASK>/test.parquet
 
 ### Benchmark Training
 
-Run a benchmark launcher directly when Ray and the environment are already initialized:
+For a standalone Qwen3-4B MATH run, use the wrapper that initializes a local Ray head. The launchers contain machine-specific default paths, so override the model and output locations:
 
 ```bash
-bash examples/ttrl/Qwen3/math.sh \
+TTVS_LOAD_MODULES=0 TTVS_CONDA_ENV=ttvs \
+bash scripts/train_qwen3.sh \
   actor_rollout_ref.model.path=/path/to/Qwen3-4B \
-  critic.model.path=/path/to/Qwen3-4B
+  critic.model.path=/path/to/Qwen3-4B \
+  trainer.default_local_dir=/path/to/checkpoints/ttvs-math
 ```
 
-We provide more details for [`Configuration`](docs/Configuration.md).
+To use an existing Ray cluster, set `RAY_ADDRESS` and invoke the benchmark launcher directly. Reducing the GPU count generally also requires smaller batch sizes, rollout budgets, sequence lengths, and micro-batches.
+
+See [`Configuration`](docs/Configuration.md) for benchmark-specific launchers and the full set of TTVS overrides.
 
 ## Citation
 

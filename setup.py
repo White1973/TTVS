@@ -47,7 +47,11 @@ TEST_REQUIRES = ["pytest", "pre-commit", "py-spy"]
 PRIME_REQUIRES = ["pyext"]
 GEO_REQUIRES = ["mathruler", "torchvision", "qwen_vl_utils"]
 GPU_REQUIRES = ["liger-kernel", "flash-attn"]
-MATH_REQUIRES = ["math-verify"]  # Add math-verify as an optional dependency
+MATH_REQUIRES = [
+    "latex2sympy2_extended",
+    "math-verify",
+    "sympy",
+]
 VLLM_REQUIRES = ["tensordict<=0.6.2", "vllm<=0.8.5"]
 SGLANG_REQUIRES = [
     "tensordict<=0.6.2",
@@ -82,6 +86,7 @@ setup(
     author="Bytedance - Seed - MLSys",
     author_email="zhangchi.usc1992@bytedance.com, gmsheng@connect.hku.hk",
     description="verl: Volcano Engine Reinforcement Learning for LLM",
+    python_requires=">=3.10",
     install_requires=install_requires,
     extras_require=extras_require,
     package_data={
