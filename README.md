@@ -127,7 +127,7 @@ bash examples/ttrl/Qwen3/math.sh \
   critic.model.path=/path/to/Qwen3-4B
 ```
 
-We provide more details for [`Quick_Start`](docs/Quick_Start.md).
+We provide more details for [`Configuration`](docs/Configuration.md).
 
 ## Citation
 
