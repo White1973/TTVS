@@ -131,14 +131,12 @@ We provide more details for [`Configuration`](docs/Configuration.md).
 If you use TTVS, please cite:
 
 ```bibtex
-@inproceedings{bai-etal-2026-ttvs,
-  title     = {{TTVS}: Boosting Self-Exploring Reinforcement Learning via Test-time Variational Synthesis},
-  author    = {Bai, Sikai and Li, Haoxi and Zhang, Jie and Liu, Yongjiang and Guo, Song},
-  booktitle = {Findings of the Association for Computational Linguistics: ACL 2026},
-  year      = {2026},
-  month     = {July},
-  pages     = {32651--32665},
-  publisher = {Association for Computational Linguistics}
+@inproceedings{bai2026ttvs,
+  title={Ttvs: Boosting self-exploring reinforcement learning via test-time variational synthesis},
+  author={Bai, Sikai and Li, Haoxi and Zhang, Jie and Liu, Yongjiang and Guo, Song},
+  booktitle={Findings of the Association for Computational Linguistics: ACL 2026},
+  pages={32651--32665},
+  year={2026}
 }
 ```
 
